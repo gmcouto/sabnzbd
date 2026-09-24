@@ -28,6 +28,8 @@ import sabnzbd
 from sabnzbd.encryption import (
     DecryptionAdapter,
     parse_yencryption_line,
+    extract_and_remove_yencryption,
+    ff1_encrypt,
     byte_to_numeral,
     numeral_to_byte,
 )
@@ -317,5 +319,145 @@ class TestDirectWriteGatingAndFailover:
         res = decoder.decode_yenc(article, resp)
         assert res == bytearray(expected_pt), "Expected decoded data to be authenticated plaintext"
         assert article.decoded_size == len(expected_pt)
+
+    def test_wire_restore_and_authenticated_decode(self):
+        """Full wire response: encrypted control lines + =yencryption + ciphertext body -> authenticated decode."""
+        import nacl.bindings as nb
+        import sabctools
+        import sabnzbd.decoder as decoder
+
+        # 1. Single-part article test
+        password = "test_password_123"
+        salt = bytes.fromhex("1a2b3c4d5e6f7890abcdef1234567890")
+        segment_index = 1
+        plaintext = b"Super secret test payload for SABnzbd wire decryption testing!"
+
+        adapter = DecryptionAdapter(password=password)
+        master_key = adapter.get_master_key(salt)
+        nonce = adapter.derive_body_nonce(master_key, segment_index)
+
+        enc = nb.crypto_aead_xchacha20poly1305_ietf_encrypt(plaintext, None, nonce, master_key)
+        ct = enc[:-16]
+        tag = enc[-16:]
+
+        body_encoded, body_crc = sabctools.yenc_encode(ct)
+
+        line1_pt = f"=ybegin line=128 size={len(ct)} name=test.bin".encode("ascii")
+        line2_pt = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} tag={tag.hex()}".encode("ascii")
+        line3_pt = body_encoded
+        line4_pt = f"=yend size={len(ct)} crc32={body_crc:08x}".encode("ascii")
+
+        k1, t1 = adapter.derive_control_keys(master_key, segment_index, 1)
+        wire1 = salt + ff1_encrypt(k1, t1, line1_pt)
+
+        k2, t2 = adapter.derive_control_keys(master_key, segment_index, 2)
+        wire2 = ff1_encrypt(k2, t2, line2_pt)
+
+        wire3 = line3_pt
+
+        k4, t4 = adapter.derive_control_keys(master_key, segment_index, 4)
+        wire4 = ff1_encrypt(k4, t4, line4_pt)
+
+        article = mock.MagicMock(spec=Article)
+        article.article = "wire_single@news"
+        article.nzf.nzo.password = password
+        article.nzf.filename_checked = False
+        article.lowest_partnum = True
+        article.segment_index = segment_index
+
+        resp = mock.MagicMock(spec=sabctools.NNTPResponse)
+        resp.sink_failed = False
+        resp.bytes_decoded = 0
+        resp.lines = [
+            wire1.decode("latin-1"),
+            wire2.decode("latin-1"),
+            wire3.decode("latin-1"),
+            wire4.decode("latin-1"),
+        ]
+
+        decoded = decoder.decode_yenc(article, resp)
+        assert decoded == bytearray(plaintext)
+        assert article.decoded_size == len(plaintext)
+        assert article.file_size == len(ct)
+        assert article.crc32 == body_crc
+        assert article.nzf.nzo.verify_nzf_filename.called
+
+        # 2. Multipart article test
+        line1_m_pt = f"=ybegin part=1 total=2 line=128 size={len(ct) * 2} name=multi.bin".encode("ascii")
+        line2_m_pt = f"=ypart begin=1 end={len(ct)}".encode("ascii")
+        line3_m_pt = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} tag={tag.hex()}".encode("ascii")
+        line4_m_pt = body_encoded
+        line5_m_pt = f"=yend size={len(ct)} part=1 pcrc32={body_crc:08x}".encode("ascii")
+
+        wire_m_1 = salt + ff1_encrypt(k1, t1, line1_m_pt)
+        wire_m_2 = ff1_encrypt(k2, t2, line2_m_pt)
+        k3, t3 = adapter.derive_control_keys(master_key, segment_index, 3)
+        wire_m_3 = ff1_encrypt(k3, t3, line3_m_pt)
+        wire_m_4 = line4_m_pt
+        k5, t5 = adapter.derive_control_keys(master_key, segment_index, 5)
+        wire_m_5 = ff1_encrypt(k5, t5, line5_m_pt)
+
+        article_m = mock.MagicMock(spec=Article)
+        article_m.article = "wire_multi@news"
+        article_m.nzf.nzo.password = password
+        article_m.nzf.filename_checked = True
+        article_m.lowest_partnum = False
+        article_m.segment_index = segment_index
+
+        resp_m = mock.MagicMock(spec=sabctools.NNTPResponse)
+        resp_m.sink_failed = False
+        resp_m.bytes_decoded = 0
+        resp_m.lines = [
+            wire_m_1.decode("latin-1"),
+            wire_m_2.decode("latin-1"),
+            wire_m_3.decode("latin-1"),
+            wire_m_4.decode("latin-1"),
+            wire_m_5.decode("latin-1"),
+        ]
+
+        decoded_m = decoder.decode_yenc(article_m, resp_m)
+        assert decoded_m == bytearray(plaintext)
+        assert article_m.decoded_size == len(plaintext)
+        assert article_m.file_size == len(ct) * 2
+        assert article_m.data_begin == 1
+        assert article_m.data_size == len(ct)
+        assert article_m.crc32 == body_crc
+
+        # 3. Wire CRC failure (corrupted pcrc32 in =yend)
+        bad_crc = (body_crc ^ 0xFFFFFFFF) & 0xFFFFFFFF
+        bad_line5_pt = f"=yend size={len(ct)} part=1 pcrc32={bad_crc:08x}".encode("ascii")
+        bad_wire_5 = ff1_encrypt(k5, t5, bad_line5_pt)
+
+        resp_bad_crc = mock.MagicMock(spec=sabctools.NNTPResponse)
+        resp_bad_crc.sink_failed = False
+        resp_bad_crc.bytes_decoded = 0
+        resp_bad_crc.lines = [
+            wire_m_1.decode("latin-1"),
+            wire_m_2.decode("latin-1"),
+            wire_m_3.decode("latin-1"),
+            wire_m_4.decode("latin-1"),
+            bad_wire_5.decode("latin-1"),
+        ]
+        with pytest.raises(ValueError, match="Wire CRC error"):
+            decoder.decode_yenc(article_m, resp_bad_crc)
+
+        # 4. Poly1305 authentication failure (tampered tag)
+        bad_tag = bytes([tag[0] ^ 0xFF]) + tag[1:]
+        bad_line3_pt = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} tag={bad_tag.hex()}".encode("ascii")
+        bad_wire_3 = ff1_encrypt(k3, t3, bad_line3_pt)
+
+        resp_bad_tag = mock.MagicMock(spec=sabctools.NNTPResponse)
+        resp_bad_tag.sink_failed = False
+        resp_bad_tag.bytes_decoded = 0
+        resp_bad_tag.lines = [
+            wire_m_1.decode("latin-1"),
+            wire_m_2.decode("latin-1"),
+            bad_wire_3.decode("latin-1"),
+            wire_m_4.decode("latin-1"),
+            wire_m_5.decode("latin-1"),
+        ]
+        with pytest.raises(ValueError, match="Poly1305 authentication failed"):
+            decoder.decode_yenc(article_m, resp_bad_tag)
+
 
 
