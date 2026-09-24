@@ -116,6 +116,12 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
         if search_new_server(article):
             return
 
+    except ValueError:
+        # Authentication failure: log without secrets and query next server
+        logging.info("Authentication failed for %s, trying next server", art_id)
+        if search_new_server(article):
+            return
+
     except SinkFailed:
         # The file went away under the article, so it has to be fetched again. Any
         # part of it already written is overwritten at the same offsets next time.
@@ -181,7 +187,7 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
         # Causing the decoder-queue to fill up and delay the downloader
         sabnzbd.ArticleCache.save_article(article, decoded_data)
         article.decoded = True
-    elif not nzo.precheck:
+    elif not nzo.precheck and article_success:
         # Either there was nothing to save, or the decoder streamed it straight to the
         # file. Both are on disk as far as the rest of the pipeline is concerned; the
         # assembler advances past an on_disk article on its own when it next runs.
@@ -220,6 +226,46 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
     # Assume it is yenc
     nzf.type = "yenc"
 
+    # Check for encrypted body if =yencryption metadata is present
+    yenc_info = getattr(response, "yencryption", None) or getattr(article, "yencryption", None)
+    if not yenc_info and getattr(response, "lines", None):
+        for line in response.lines:
+            if isinstance(line, (str, bytes)) and (
+                line.startswith("=yencryption") or line.startswith(b"=yencryption")
+            ):
+                yenc_info = line
+                break
+
+    parsed_enc = None
+    if yenc_info:
+        if isinstance(yenc_info, dict):
+            parsed_enc = yenc_info
+        elif isinstance(yenc_info, (str, bytes)):
+            from sabnzbd.encryption import parse_yencryption_line
+
+            parsed_enc = parse_yencryption_line(yenc_info)
+
+    if parsed_enc and decoded_data is not None:
+        password = None
+        if hasattr(article, "nzf") and hasattr(article.nzf, "nzo"):
+            password = getattr(article.nzf.nzo, "password", None)
+        if not password and hasattr(article, "password"):
+            password = article.password
+
+        from sabnzbd.encryption import DecryptionAdapter
+
+        adapter = DecryptionAdapter(password=password)
+        segment_index = getattr(article, "segment_index", None) or 1
+
+        plaintext = adapter.decrypt_body(
+            ciphertext=bytes(decoded_data),
+            tag=parsed_enc["tag"],
+            salt=parsed_enc["salt"],
+            segment_index=segment_index,
+        )
+        decoded_data = bytearray(plaintext)
+        article.decoded_size = len(decoded_data)
+
     # Only set the name if it was found and not obfuscated. Streamed articles never
     # reach here: a sink is only handed out once the filename has been checked, exactly
     # because this needs the bytes.
@@ -235,6 +281,8 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
     # CRC check
     if (crc := response.crc) is None:
         logging.info("CRC Error in %s", article.article)
+        if parsed_enc:
+            raise ValueError(f"Wire CRC error in encrypted article {article.article}")
         # A streamed article is already on disk, so there is nothing to hand back; the
         # bytes stay put either way, so par2 has the same chance of repairing it
         raise BadData(decoded_data)

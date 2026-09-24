@@ -24,12 +24,15 @@ from pathlib import Path
 from unittest import mock
 import pytest
 
+import sabnzbd
 from sabnzbd.encryption import (
     DecryptionAdapter,
     parse_yencryption_line,
     byte_to_numeral,
     numeral_to_byte,
 )
+from sabnzbd.nzb import Article
+from sabnzbd.newswrapper import NewsWrapper
 
 
 def _get_test_vector_dir() -> Path:
@@ -181,4 +184,138 @@ class TestDecryptionAdapterContracts:
         # Invalid lines
         assert parse_yencryption_line("not an encryption line") is None
         assert parse_yencryption_line("=yencryption cipher=AES salt=123 tag=456") is None
+
+
+class TestDirectWriteGatingAndFailover:
+    """Test suite verifying direct-write gating and authentication error routing."""
+
+    def test_direct_write_gated(self):
+        """article_sink returns None for password-bearing releases, enabling direct-write only for plain releases."""
+        # Mock server instance
+        wrapper = mock.MagicMock(spec=NewsWrapper)
+
+        # 1. Password-bearing article: direct-write must be refused (return None)
+        article_enc = mock.MagicMock(spec=Article)
+        article_enc.nzf.nzo.password = "secret_password"
+        article_enc.nzf.type = "yenc"
+        article_enc.lowest_partnum = False
+        article_enc.nzf.prepare_filepath.return_value = True
+
+        mock_monitor = mock.MagicMock(allow_direct_decode=True)
+        with (
+            mock.patch.object(sabnzbd.cfg, "direct_decode", return_value=True),
+            mock.patch.object(sabnzbd.cfg, "direct_write", return_value=True),
+            mock.patch.object(sabnzbd, "WriteMonitor", mock_monitor, create=True),
+        ):
+            sink = NewsWrapper.article_sink(wrapper, article_enc)
+            assert sink is None, "Expected direct-write to be refused for password-bearing release"
+
+        # 2. Unencrypted article: direct-write allowed when configured
+        article_plain = mock.MagicMock(spec=Article)
+        article_plain.nzf.nzo.password = None
+        article_plain.nzf.type = "yenc"
+        article_plain.lowest_partnum = False
+        article_plain.nzf.prepare_filepath.return_value = True
+        mock_writer = mock.MagicMock()
+
+        mock_assembler = mock.MagicMock()
+        mock_assembler.get_writer.return_value = mock_writer
+        with (
+            mock.patch.object(sabnzbd.cfg, "direct_decode", return_value=True),
+            mock.patch.object(sabnzbd.cfg, "direct_write", return_value=True),
+            mock.patch.object(sabnzbd, "WriteMonitor", mock_monitor, create=True),
+            mock.patch.object(sabnzbd, "Assembler", mock_assembler, create=True),
+        ):
+            sink = NewsWrapper.article_sink(wrapper, article_plain)
+            assert sink == mock_writer, "Expected direct-write sink to be returned for plain release"
+
+    def test_auth_failure_triggers_server_search(self):
+        """Poly1305 authentication error in decode() triggers search_new_server without unhandled crash."""
+        import sabnzbd
+        import sabnzbd.decoder as decoder
+        import sabctools
+
+        article = mock.MagicMock(spec=Article)
+        article.article = "art_fail@news"
+        article.nzf.nzo.password = "test123"
+        article.nzf.nzo.precheck = False
+        article.lowest_partnum = False
+        article.segment_index = 1
+        article.on_disk = False
+        article.search_new_server.return_value = True
+
+        # NNTPResponse with bad tag causing Poly1305 authentication failure
+        resp = mock.MagicMock(spec=sabctools.NNTPResponse)
+        resp.sink_failed = False
+        resp.format = sabctools.EncodingFormat.YENC
+        resp.data = bytearray(b"corrupted ciphertext")
+        resp.file_size = 1000
+        resp.part_begin = 0
+        resp.part_size = 20
+        resp.bytes_decoded = 20
+        resp.file_name = "test.bin"
+        resp.crc = 0x12345678
+        resp.lines = None
+        resp.yencryption = {
+            "cipher": "XChaCha20-Poly1305",
+            "salt": b"\x01" * 16,
+            "tag": b"\x02" * 16,
+        }
+
+        mock_cache = mock.MagicMock()
+        mock_queue = mock.MagicMock()
+        with (
+            mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
+            mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
+        ):
+            decoder.decode(article, resp)
+            # search_new_server should have been called via article.search_new_server()
+            assert article.search_new_server.called, "search_new_server should be called on auth failure"
+            # Zero-output guarantee: cache save must NOT be called
+            assert not mock_cache.save_article.called, "save_article must not be called on authentication failure"
+            assert not article.on_disk, "article.on_disk must remain False on auth failure"
+
+    def test_successful_encrypted_decode(self):
+        """decode_yenc restores authenticated plaintext when valid =yencryption metadata is present."""
+        import sabnzbd.decoder as decoder
+        import sabctools
+
+        vector_dir = _get_test_vector_dir()
+        with open(vector_dir / "body_encryption.json", "r", encoding="utf-8") as f:
+            body_data = json.load(f)
+
+        vec = body_data["vectors"][0]
+        password = vec["password"]
+        salt = bytes.fromhex(vec["salt_hex"])
+        ct = bytes.fromhex(vec["expected_ciphertext_hex"])
+        tag = bytes.fromhex(vec["expected_tag_hex"])
+        expected_pt = bytes.fromhex(vec["plaintext_hex"])
+
+        article = mock.MagicMock(spec=Article)
+        article.article = "art_ok@news"
+        article.nzf.nzo.password = password
+        article.nzf.filename_checked = True
+        article.lowest_partnum = False
+        article.segment_index = vec["segment_index"]
+
+        resp = mock.MagicMock(spec=sabctools.NNTPResponse)
+        resp.sink_failed = False
+        resp.data = bytearray(ct)
+        resp.file_size = 100
+        resp.part_begin = 0
+        resp.part_size = len(ct)
+        resp.bytes_decoded = len(ct)
+        resp.file_name = "test.bin"
+        resp.crc = 0x12345678
+        resp.lines = None
+        resp.yencryption = {
+            "cipher": "XChaCha20-Poly1305",
+            "salt": salt,
+            "tag": tag,
+        }
+
+        res = decoder.decode_yenc(article, resp)
+        assert res == bytearray(expected_pt), "Expected decoded data to be authenticated plaintext"
+        assert article.decoded_size == len(expected_pt)
+
 
