@@ -347,6 +347,35 @@ class TestNzbParser:
         assert f2_1.segment_index_base == f2_2.segment_index_base == 3
         assert [a.segment_index for a in f2_1.decodetable] == [a.segment_index for a in f2_2.decodetable] == [3]
 
+    @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
+    def test_password_redacted_from_parser_logs(self, caplog):
+        """Captured parser logs may name metadata keys but never contain the password value."""
+        secret_sentinel = "SECRET_PASSWORD_SENTINEL_XYZ_98765"
+        xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
+ <head>
+  <meta type="password">{secret_sentinel}</meta>
+  <meta type="category">movies</meta>
+ </head>
+ <file poster="p@test.com" date="1600000000" subject="&quot;test.bin&quot; yEnc (1/1)">
+  <segments><segment bytes="1000" number="1">m1@test</segment></segments>
+ </file>
+</nzb>"""
+        nzb_file = _write_nzb_gz(SAB_CACHE_DIR, "test_secret_log", xml)
+        nzo = NzbObject("test_secret_log")
+
+        import logging
+
+        with caplog.at_level(logging.DEBUG):
+            nzbparser.nzbfile_parser(nzb_file, nzo)
+
+        # The secret password MUST be completely absent from any captured log messages
+        assert secret_sentinel not in caplog.text
+
+        # The password metadata must still be present in nzo.meta for downstream consumption
+        assert nzo.meta.get("password") == [secret_sentinel]
+        assert nzo.meta.get("category") == ["movies"]
+
     @pytest.mark.xfail(reason="These tests should be added")
     def test_nzbparser_bad_stuff(self):
         # TODO: Add tests for:

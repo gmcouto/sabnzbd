@@ -400,6 +400,9 @@ class NzbFile(TryList):
             self.articles = {x: x for x in self.articles}
         for article in self.articles:
             article.lock = self.lock
+        if self.decodetable:
+            for article in self.decodetable:
+                article.lock = self.lock
         super().__setstate__(dict_.get("try_list", []))
 
     def __lt__(self, other: "NzbFile"):
