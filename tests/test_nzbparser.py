@@ -376,10 +376,3 @@ class TestNzbParser:
         assert nzo.meta.get("password") == [secret_sentinel]
         assert nzo.meta.get("category") == ["movies"]
 
-    @pytest.mark.xfail(reason="These tests should be added")
-    def test_nzbparser_bad_stuff(self):
-        # TODO: Add tests for:
-        #  Duplicate parts
-        #  Strange articles sizes
-        #  Correct parsing of dates
-        assert False
