@@ -296,6 +296,20 @@ def extract_and_remove_yencryption(yenc_block: bytes) -> tuple[dict[str, Any], b
     return params, b"".join(clean_lines)
 
 
+def extract_salt_from_line1(line1: bytes) -> bytes:
+    """Extract and validate 16-byte salt from control line 1 per yEnc Control Lines Standard v1.0.
+
+    Ensures line is at least 18 bytes and contains no forbidden bytes (0x00, 0x0A, 0x0D).
+    """
+    if len(line1) < 18:
+        raise ValueError(f"Line 1 truncated: {len(line1)} bytes (minimum 18)")
+    salt = line1[:16]
+    for b in salt:
+        if b in (0x00, 0x0A, 0x0D):
+            raise ValueError(f"Forbidden byte 0x{b:02x} in salt (0x00, 0x0A, 0x0D forbidden)")
+    return salt
+
+
 class DecryptionAdapter:
     """SABnzbd decryption adapter encapsulating Argon2id, PyNaCl, and FF1."""
 
@@ -395,14 +409,8 @@ class DecryptionAdapter:
             ending = b""
             line1_content = line1_raw
 
-        if len(line1_content) < 18:
-            raise ValueError(f"Line 1 truncated: {len(line1_content)} bytes")
-
         # Line 1: first 16 bytes is salt
-        salt = line1_content[:16]
-        for b in salt:
-            if b in (0x00, 0x0A, 0x0D):
-                raise ValueError(f"Forbidden byte 0x{b:02x} in salt")
+        salt = extract_salt_from_line1(line1_content)
 
         ct1 = line1_content[16:]
         master_key = self.get_master_key(salt)

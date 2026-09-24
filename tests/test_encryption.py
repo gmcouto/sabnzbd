@@ -29,7 +29,9 @@ from sabnzbd.encryption import (
     DecryptionAdapter,
     parse_yencryption_line,
     extract_and_remove_yencryption,
+    extract_salt_from_line1,
     ff1_encrypt,
+    ff1_decrypt,
     byte_to_numeral,
     numeral_to_byte,
 )
@@ -464,6 +466,180 @@ class TestDirectWriteGatingAndFailover:
         ]
         with pytest.raises(ValueError, match="Poly1305 authentication failed"):
             decoder.decode_yenc(article_m, resp_bad_tag)
+
+    def test_extract_and_remove_yencryption(self):
+        """Verify strict header placement, extraction, duplicate/misplaced rejection, and stripping."""
+        valid_hdr = b"=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 tag=0cd77ce245a654463f90b945b1d22d5b"
+
+        # 1. Valid single-part article (header at line 2)
+        single = (
+            b"=ybegin line=128 size=100 name=test.bin\r\n"
+            + valid_hdr
+            + b"\r\n"
+            b"DataLine1\r\n"
+            b"=yend size=100\r\n"
+        )
+        params, clean = extract_and_remove_yencryption(single)
+        assert params["cipher"] == "XChaCha20-Poly1305"
+        assert params["salt"] == bytes.fromhex("1a2b3c4d5e6f7890abcdef1234567890")
+        assert params["tag"] == bytes.fromhex("0cd77ce245a654463f90b945b1d22d5b")
+        assert clean == (
+            b"=ybegin line=128 size=100 name=test.bin\r\n"
+            b"DataLine1\r\n"
+            b"=yend size=100\r\n"
+        )
+
+        # 2. Valid multipart article (header at line 3, following =ypart)
+        multi = (
+            b"=ybegin part=1 total=2 line=128 size=200 name=test.bin\r\n"
+            b"=ypart begin=1 end=100\r\n"
+            + valid_hdr
+            + b"\r\n"
+            b"DataLine1\r\n"
+            b"=yend size=100 part=1\r\n"
+        )
+        m_params, m_clean = extract_and_remove_yencryption(multi)
+        assert m_params["cipher"] == "XChaCha20-Poly1305"
+        assert m_clean == (
+            b"=ybegin part=1 total=2 line=128 size=200 name=test.bin\r\n"
+            b"=ypart begin=1 end=100\r\n"
+            b"DataLine1\r\n"
+            b"=yend size=100 part=1\r\n"
+        )
+
+        # 3. Missing =yencryption line
+        missing = (
+            b"=ybegin line=128 size=100 name=test.bin\r\n"
+            b"DataLine1\r\n"
+            b"=yend size=100\r\n"
+        )
+        with pytest.raises(ValueError, match="does not start with =yencryption"):
+            extract_and_remove_yencryption(missing)
+
+        # 4. Duplicate =yencryption line
+        dup = (
+            b"=ybegin line=128 size=100 name=test.bin\r\n"
+            + valid_hdr
+            + b"\r\n"
+            b"DataLine1\r\n"
+            + valid_hdr
+            + b"\r\n"
+            b"=yend size=100\r\n"
+        )
+        with pytest.raises(ValueError, match="Duplicate or misplaced =yencryption"):
+            extract_and_remove_yencryption(dup)
+
+        # 5. Misplaced =yencryption (at line 3 in single-part)
+        misplaced_single = (
+            b"=ybegin line=128 size=100 name=test.bin\r\n"
+            b"DataLine1\r\n"
+            + valid_hdr
+            + b"\r\n"
+            b"=yend size=100\r\n"
+        )
+        with pytest.raises(ValueError, match="does not start with =yencryption"):
+            extract_and_remove_yencryption(misplaced_single)
+
+        # 6. Misplaced =yencryption (at line 2 instead of line 3 in multipart)
+        misplaced_multi = (
+            b"=ybegin part=1 total=2 line=128 size=200 name=test.bin\r\n"
+            + valid_hdr
+            + b"\r\n"
+            b"=ypart begin=1 end=100\r\n"
+            b"DataLine1\r\n"
+            b"=yend size=100 part=1\r\n"
+        )
+        with pytest.raises(ValueError, match="does not start with =ypart"):
+            extract_and_remove_yencryption(misplaced_multi)
+
+        # 7. Line 1 not =ybegin
+        not_begin = (
+            b"not_ybegin\r\n"
+            + valid_hdr
+            + b"\r\n"
+            b"=yend size=100\r\n"
+        )
+        with pytest.raises(ValueError, match="Line 1 does not start with =ybegin"):
+            extract_and_remove_yencryption(not_begin)
+
+    def test_malformed_inputs_matrix(self):
+        """Verify that all malformed header and control line test vectors fail closed with ValueError."""
+        vector_dir = _get_test_vector_dir()
+        with open(vector_dir / "malformed_inputs.json", "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        with open(vector_dir / "control_line_encryption.json", "r", encoding="utf-8") as cf:
+            control_data = json.load(cf)
+
+        for vec in data["vectors"]:
+            cat = vec["category"]
+            vec_id = vec["id"]
+
+            if cat == "header_syntax":
+                # Must fail parse_yencryption_line
+                assert parse_yencryption_line(vec["input_line"]) is None, f"Expected None for {vec_id}"
+                # Must fail extract_and_remove_yencryption when in header position
+                dummy = (
+                    b"=ybegin line=128 size=10 name=test\r\n"
+                    + vec["input_line"].encode("ascii", errors="replace")
+                    + b"\r\n=yend size=10\r\n"
+                )
+                with pytest.raises(ValueError):
+                    extract_and_remove_yencryption(dummy)
+
+            elif cat == "control_syntax":
+                adapter = DecryptionAdapter(password="test123")
+                if "tampered_salt_hex" in vec:
+                    # Line 1 with forbidden bytes in salt
+                    raw_salt = bytes.fromhex(vec["tampered_salt_hex"])
+                    line1 = raw_salt + b"=ybegin line=128 size=18"
+                    with pytest.raises(ValueError, match="Forbidden byte"):
+                        extract_salt_from_line1(line1)
+                    wire = raw_salt + b"=" * 20 + b"\r\n"
+                    with pytest.raises(ValueError):
+                        adapter.restore_control_lines(wire, segment_index=1)
+                elif vec_id == "control-syntax-04-line-too-short":
+                    short_bytes = bytes.fromhex(vec["line_hex"])
+                    with pytest.raises(ValueError, match="Line too short"):
+                        ff1_decrypt(b"0" * 32, b"0" * 8, short_bytes)
+                    with pytest.raises(ValueError, match="Line too short"):
+                        ff1_encrypt(b"0" * 32, b"0" * 8, short_bytes)
+                elif vec_id == "control-syntax-05-line1-truncated":
+                    wire = bytes.fromhex(vec["line1_hex"]) + b"\r\n"
+                    with pytest.raises(ValueError, match="Line 1 truncated"):
+                        adapter.restore_control_lines(wire, segment_index=1)
+                elif vec_id == "control-syntax-06-wrong-password":
+                    # Valid wire line 1 from control_line_encryption.json
+                    wire_line1 = bytes.fromhex(control_data["vectors"][0]["expected_wire_hex"]) + b"\r\n"
+                    wrong_adapter = DecryptionAdapter(password=vec["wrong_password"])
+                    with pytest.raises(ValueError, match="Control line decrypt failure"):
+                        wrong_adapter.restore_control_lines(wire_line1, segment_index=1)
+
+    def test_zero_output_matrix(self):
+        """Verify that all auth_failure test vectors fail authentication and produce zero plaintext output."""
+        vector_dir = _get_test_vector_dir()
+        with open(vector_dir / "malformed_inputs.json", "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        for vec in data["vectors"]:
+            if vec["category"] != "auth_failure":
+                continue
+
+            vec_id = vec["id"]
+            pwd = vec["password"]
+            salt = bytes.fromhex(vec["salt_hex"])
+            ct = bytes.fromhex(vec.get("tampered_ciphertext_hex") or vec.get("ciphertext_hex"))
+            tag = bytes.fromhex(vec.get("tampered_tag_hex") or vec.get("tag_hex"))
+            seg_idx = vec["segment_index"]
+
+            adapter = DecryptionAdapter(password=pwd)
+
+            output = None
+            with pytest.raises(ValueError, match="Poly1305 authentication failed"):
+                output = adapter.decrypt_body(ct, tag, salt, seg_idx)
+
+            # Assert zero output released
+            assert output is None, f"Zero-output violated for {vec_id}"
 
 
 
