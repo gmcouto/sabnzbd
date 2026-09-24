@@ -570,7 +570,17 @@ class Downloader(Thread):
         sabnzbd.BPSMeter.register_server_article_tried(article.fetcher.id)
 
         # Handle broken articles directly
-        if not response or (not response.bytes_decoded and not article.nzf.nzo.precheck):
+        has_lines = bool(response and getattr(response, "lines", None))
+        has_password = bool(
+            getattr(getattr(getattr(article, "nzf", None), "nzo", None), "password", None)
+            or getattr(article, "password", None)
+        )
+
+        if not response or (
+            not response.bytes_decoded
+            and not article.nzf.nzo.precheck
+            and not (has_lines and has_password)
+        ):
             if not article.search_new_server():
                 article.nzf.nzo.increase_bad_articles_counter("missing_articles")
                 sabnzbd.NzbQueue.register_article(article, success=False)

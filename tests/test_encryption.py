@@ -292,10 +292,11 @@ class TestDirectWriteGatingAndFailover:
         resp_broken.bytes_decoded = 0
         resp_broken.lines = ["some_line"]
 
+        mock_queue = mock.MagicMock()
         with (
             mock.patch.object(sabnzbd, "BPSMeter", mock_bps, create=True),
             mock.patch.object(sabnzbd.decoder, "decode") as mock_decoder_decode,
-            mock.patch.object(sabnzbd.NzbQueue, "register_article"),
+            mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
         ):
             Downloader.decode(art_broken, resp_broken)
             assert not mock_decoder_decode.called, "Broken article must not be forwarded to decoder.decode"

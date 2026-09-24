@@ -204,6 +204,8 @@ class NewsWrapper:
         # is never written directly to destination files (Zero-Output Guarantee).
         if hasattr(article, "nzf") and hasattr(article.nzf, "nzo") and getattr(article.nzf.nzo, "password", None):
             return None
+        if hasattr(article, "password") and getattr(article, "password", None):
+            return None
 
         nzf = article.nzf
         # type is only known once the first article of the file has decoded, and uu
