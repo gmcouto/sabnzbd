@@ -196,15 +196,15 @@ class NewsWrapper:
         if not article or not sabnzbd.cfg.direct_decode() or not sabnzbd.cfg.direct_write():
             return None
 
-        if not sabnzbd.WriteMonitor.allow_direct_decode:
-            return None
-
         # Gate direct-write for password-protected releases:
         # Returning None forces decoding into memory, ensuring unauthenticated ciphertext
         # is never written directly to destination files (Zero-Output Guarantee).
         if hasattr(article, "nzf") and hasattr(article.nzf, "nzo") and getattr(article.nzf.nzo, "password", None):
             return None
         if hasattr(article, "password") and getattr(article, "password", None):
+            return None
+
+        if not sabnzbd.WriteMonitor.allow_direct_decode:
             return None
 
         nzf = article.nzf

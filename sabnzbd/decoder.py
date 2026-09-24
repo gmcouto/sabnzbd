@@ -144,7 +144,7 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
         article.allow_new_fetcher()
         return
 
-    except (BadYenc, ValueError):
+    except BadYenc:
         # Handles precheck and badly formed articles
         if nzo.precheck and decoder.status_code == 223:
             # STAT was used, so we only get a status code

@@ -21,10 +21,15 @@ tests.test_encryption - Unit and integration tests for SABnzbd decryption adapte
 
 import json
 from pathlib import Path
+import socket
+import threading
+import time
 from unittest import mock
 import pytest
 
 import sabnzbd
+from sabnzbd.downloader import Server, Downloader
+from sabnzbd.get_addrinfo import AddrInfo
 from sabnzbd.encryption import (
     DecryptionAdapter,
     parse_yencryption_line,
@@ -46,6 +51,76 @@ def _get_test_vector_dir() -> Path:
     if not vector_dir.exists():
         pytest.skip(f"Test vectors not found at {vector_dir}")
     return vector_dir
+
+
+class MockArticleNNTPServer:
+    """Minimal NNTP server providing custom responses for BODY commands."""
+
+    def __init__(self, body_bytes: bytes, host: str = "127.0.0.1"):
+        self.host: str = host
+        self.port: int = 0
+        self.server_socket = None
+        self.connections = []
+        self._stop = threading.Event()
+        self._thread = None
+        self.body_bytes: bytes = body_bytes
+
+    def start(self):
+        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.server_socket.bind((self.host, self.port))
+        self.port = self.server_socket.getsockname()[1]
+        self.server_socket.listen(5)
+        self.server_socket.settimeout(0.5)
+        self._thread = threading.Thread(target=self._accept_loop, daemon=True)
+        self._thread.start()
+
+    def _accept_loop(self):
+        while not self._stop.is_set():
+            try:
+                conn, _addr = self.server_socket.accept()
+                self.connections.append(conn)
+                threading.Thread(target=self._handle_client, args=(conn,), daemon=True).start()
+            except OSError:
+                pass
+
+    def _handle_client(self, conn):
+        try:
+            conn.sendall(b"200 Welcome\r\n")
+            while not self._stop.is_set():
+                conn.settimeout(0.5)
+                try:
+                    data = conn.recv(1024)
+                    if not data:
+                        break
+                    if data.startswith(b"QUIT"):
+                        conn.sendall(b"205 Goodbye\r\n")
+                        break
+                    elif data.startswith(b"BODY"):
+                        resp = b"222 0 <art@e2e>\r\n" + self.body_bytes + b".\r\n"
+                        conn.sendall(resp)
+                    elif data.startswith(b"authinfo user"):
+                        conn.sendall(b"381 More auth required\r\n")
+                    elif data.startswith(b"authinfo pass"):
+                        conn.sendall(b"281 Auth accepted\r\n")
+                except TimeoutError:
+                    continue
+        except Exception:
+            pass
+        finally:
+            conn.close()
+
+    def stop(self):
+        self._stop.set()
+        for conn in self.connections:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        if self.server_socket:
+            self.server_socket.close()
+        if self._thread:
+            self._thread.join(timeout=2)
 
 
 class TestDecryptionAdapterContracts:
@@ -704,6 +779,187 @@ class TestDirectWriteGatingAndFailover:
 
             # Assert zero output released
             assert output is None, f"Zero-output violated for {vec_id}"
+
+    def test_downloader_encrypted_e2e(self, caplog):
+        """Dual-server failover: corrupted server 1 fails auth and fails over to server 2 which succeeds."""
+        import nacl.bindings as nb
+        import sabctools
+
+        password = "multi_server_secret_password"
+        salt = bytes.fromhex("1a2b3c4d5e6f7890abcdef1234567890")
+        segment_index = 1
+        plaintext = b"Dual server failover end-to-end integration test payload!"
+
+        adapter = DecryptionAdapter(password=password)
+        master_key = adapter.get_master_key(salt)
+        nonce = adapter.derive_body_nonce(master_key, segment_index)
+
+        enc = nb.crypto_aead_xchacha20poly1305_ietf_encrypt(plaintext, None, nonce, master_key)
+        ct = enc[:-16]
+        tag = enc[-16:]
+
+        body_encoded, body_crc = sabctools.yenc_encode(ct)
+
+        line1_pt = f"=ybegin line=128 size={len(ct)} name=test.bin".encode("ascii")
+        line2_pt = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} tag={tag.hex()}".encode("ascii")
+        line3_pt = body_encoded
+        line4_pt = f"=yend size={len(ct)} crc32={body_crc:08x}".encode("ascii")
+
+        k1, t1 = adapter.derive_control_keys(master_key, segment_index, 1)
+        wire1 = salt + ff1_encrypt(k1, t1, line1_pt)
+        k2, t2 = adapter.derive_control_keys(master_key, segment_index, 2)
+        wire2 = ff1_encrypt(k2, t2, line2_pt)
+        wire3 = line3_pt
+        k4, t4 = adapter.derive_control_keys(master_key, segment_index, 4)
+        wire4 = ff1_encrypt(k4, t4, line4_pt)
+
+        valid_body = wire1 + b"\r\n" + wire2 + b"\r\n" + wire3 + b"\r\n" + wire4 + b"\r\n"
+
+        bad_tag = bytes([tag[0] ^ 0xFF]) + tag[1:]
+        line2_bad_pt = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} tag={bad_tag.hex()}".encode("ascii")
+        wire2_bad = ff1_encrypt(k2, t2, line2_bad_pt)
+        bad_body = wire1 + b"\r\n" + wire2_bad + b"\r\n" + wire3 + b"\r\n" + wire4 + b"\r\n"
+
+        srv1 = MockArticleNNTPServer(bad_body)
+        srv1.start()
+        srv2 = MockArticleNNTPServer(valid_body)
+        srv2.start()
+
+        try:
+            s1 = Server(
+                server_id="srv1",
+                displayname="Primary Bad Server",
+                host=srv1.host,
+                port=srv1.port,
+                timeout=5,
+                threads=0,
+                priority=0,
+                use_ssl=False,
+                ssl_verify=0,
+                ssl_ciphers="",
+                pipelining_requests=mock.Mock(return_value=1),
+            )
+            s1.addrinfo = AddrInfo(*socket.getaddrinfo(srv1.host, srv1.port, socket.AF_INET, socket.SOCK_STREAM)[0])
+            s1.active = True
+
+            s2 = Server(
+                server_id="srv2",
+                displayname="Backup Good Server",
+                host=srv2.host,
+                port=srv2.port,
+                timeout=5,
+                threads=0,
+                priority=1,
+                use_ssl=False,
+                ssl_verify=0,
+                ssl_ciphers="",
+                pipelining_requests=mock.Mock(return_value=1),
+            )
+            s2.addrinfo = AddrInfo(*socket.getaddrinfo(srv2.host, srv2.port, socket.AF_INET, socket.SOCK_STREAM)[0])
+            s2.active = True
+
+            mock_downloader = mock.MagicMock(spec=Downloader)
+            mock_downloader.servers = [s1, s2]
+            mock_downloader.reset_nw = lambda nw, *args, **kwargs: None
+            mock_downloader.finish_connect_nw = lambda nw, resp: Downloader.finish_connect_nw(mock_downloader, nw, resp)
+            mock_downloader.decode = lambda article, resp: Downloader.decode(article, resp)
+            mock_downloader.modify_socket = lambda nw, event: None
+            mock_downloader.remove_socket = lambda nw: None
+            mock_downloader.no_active_jobs = lambda: False
+            mock_downloader.shutdown = False
+            mock_downloader.paused_for_postproc = False
+            mock_downloader.force_disconnect = False
+
+            mock_bps = mock.MagicMock()
+            mock_cache = mock.MagicMock()
+            mock_queue = mock.MagicMock()
+
+            mock_nzo = mock.MagicMock()
+            mock_nzo.password = password
+            mock_nzo.precheck = False
+            mock_nzo.removed_from_queue = False
+            mock_nzo.status = "active"
+            mock_nzo.priority = 0
+            mock_nzo.update_download_stats = mock.MagicMock()
+
+            mock_nzf = mock.MagicMock()
+            mock_nzf.nzo = mock_nzo
+            mock_nzf.filename_checked = True
+            mock_nzf.type = "yenc"
+
+            art = Article("art@e2e", 100, mock_nzf)
+            art.lowest_partnum = False
+            art.segment_index = segment_index
+            art.on_disk = False
+            art.tries = 0
+
+            with (
+                mock.patch.object(sabnzbd, "Downloader", mock_downloader, create=True),
+                mock.patch.object(sabnzbd, "BPSMeter", mock_bps, create=True),
+                mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
+                mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
+            ):
+                # 1. Connect NW1 to Server 1 (tampered article)
+                nw1 = NewsWrapper(s1, thrdnum=1)
+                s1.idle_threads.add(nw1)
+                nw1.init_connect()
+                for _ in range(50):
+                    if nw1.connected:
+                        break
+                    time.sleep(0.05)
+                nw1.nntp.sock.setblocking(True)
+                nw1.nntp.sock.settimeout(2)
+                nw1.read()
+                assert nw1.ready
+
+                # Request article from Server 1
+                art.fetcher = s1
+                nw1.queue_article(art)
+                nw1.write()
+                nw1.read()
+
+                # Server 1 must fail auth and failover to Server 2
+                assert s1 in art.try_list
+                assert mock_bps.register_server_article_failed.called
+                assert not mock_cache.save_article.called
+                assert not mock_nzo.increase_bad_articles_counter.called
+
+                # 2. Connect NW2 to Server 2 (valid article)
+                nw2 = NewsWrapper(s2, thrdnum=1)
+                s2.idle_threads.add(nw2)
+                nw2.init_connect()
+                for _ in range(50):
+                    if nw2.connected:
+                        break
+                    time.sleep(0.05)
+                nw2.nntp.sock.setblocking(True)
+                nw2.nntp.sock.settimeout(2)
+                nw2.read()
+                assert nw2.ready
+
+                # Request article from Server 2
+                art.fetcher = s2
+                nw2.queue_article(art)
+                nw2.write()
+                nw2.read()
+
+                # Server 2 must succeed and save byte-identical plaintext
+                assert mock_cache.save_article.called
+                _saved_art, saved_data = mock_cache.save_article.call_args[0]
+                assert bytes(saved_data) == plaintext
+
+            # Log safety checks: no secrets leaked to logs
+            log_text = caplog.text
+            assert password not in log_text, "Password must not appear in logs"
+            assert master_key.hex() not in log_text, "Master key must not appear in logs"
+            assert nonce.hex() not in log_text, "Nonce must not appear in logs"
+            assert tag.hex() not in log_text, "Tag must not appear in logs"
+            assert plaintext.decode("ascii") not in log_text, "Plaintext must not appear in logs"
+            assert "Authentication failed for art@e2e, trying next server" in log_text
+
+        finally:
+            srv1.stop()
+            srv2.stop()
 
 
 
