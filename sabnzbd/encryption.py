@@ -80,6 +80,60 @@ def cbc_mac(aes_enc, data: bytes) -> bytes:
     return block
 
 
+def ff1_encrypt_numerals(key: bytes, tweak: bytes, numerals: list[int], radix: int = 253) -> list[int]:
+    """NIST SP 800-38G FF1 Encryption over arbitrary numeral strings."""
+    backend = Cipher(algorithms.AES(key), modes.ECB()).encryptor()
+    aes_enc = backend.update
+    n = len(numerals)
+    t = len(tweak)
+    u = n // 2
+    v = n - u
+    b = math.ceil(math.ceil(v * math.log2(radix)) / 8)
+    d = 4 * math.ceil(b / 4) + 4
+
+    p = bytearray(16)
+    p[0], p[1], p[2] = 1, 2, 1
+    p[3:6] = radix.to_bytes(3, "big")
+    p[6] = 10
+    p[7] = u % 256
+    p[8:12] = n.to_bytes(4, "big")
+    p[12:16] = t.to_bytes(4, "big")
+
+    pad_len = ((-t - b - 1) % 16 + 16) % 16
+    q_prefix = tweak + bytes(pad_len)
+
+    A = list(numerals[:u])
+    B = list(numerals[u:])
+
+    for i in range(10):
+        q = q_prefix + bytes([i]) + num_radix(B, radix).to_bytes(b, "big")
+        R = cbc_mac(aes_enc, bytes(p) + q)
+        S = bytearray(R)
+        j = 1
+        while len(S) < d:
+            j_bytes = j.to_bytes(16, "big")
+            blk = bytes(a ^ b for a, b in zip(R, j_bytes))
+            S.extend(aes_enc(blk))
+            j += 1
+        y = int.from_bytes(S[:d], "big")
+        m = u if i % 2 == 0 else v
+        c = (num_radix(A, radix) + y) % (radix**m)
+        C = str_radix(c, radix, m)
+        A = B
+        B = C
+
+    return A + B
+
+
+def ff1_encrypt(key: bytes, tweak: bytes, plaintext_bytes: bytes, radix: int = 253) -> bytes:
+    """Encrypt control line byte string using FF1 over Radix 253 Alphabet."""
+    if len(plaintext_bytes) < 2:
+        raise ValueError(f"Line too short: {len(plaintext_bytes)} bytes (minimum 2)")
+    numerals = [byte_to_numeral(b) for b in plaintext_bytes]
+    ct_numerals = ff1_encrypt_numerals(key, tweak, numerals, radix)
+    return bytes(numeral_to_byte(i) for i in ct_numerals)
+
+
 def ff1_decrypt_numerals(key: bytes, tweak: bytes, numerals: list[int], radix: int = 253) -> list[int]:
     """NIST SP 800-38G FF1 Decryption over arbitrary numeral strings."""
     backend = Cipher(algorithms.AES(key), modes.ECB()).encryptor()
@@ -128,6 +182,8 @@ def ff1_decrypt_numerals(key: bytes, tweak: bytes, numerals: list[int], radix: i
 
 def ff1_decrypt(key: bytes, tweak: bytes, ciphertext_bytes: bytes, radix: int = 253) -> bytes:
     """Decrypt control line byte string using FF1 over Radix 253 Alphabet."""
+    if len(ciphertext_bytes) < 2:
+        raise ValueError(f"Line too short: {len(ciphertext_bytes)} bytes (minimum 2)")
     numerals = [byte_to_numeral(b) for b in ciphertext_bytes]
     pt_numerals = ff1_decrypt_numerals(key, tweak, numerals, radix)
     return bytes(numeral_to_byte(i) for i in pt_numerals)
@@ -137,6 +193,7 @@ def parse_yencryption_line(line: str | bytes) -> Optional[dict[str, Any]]:
     """Parse standard =yencryption control line.
 
     Format: =yencryption cipher=XChaCha20-Poly1305 salt=<32_hex_chars> tag=<32_hex_chars>
+    Enforces strict token count (4), exact token order, exact lowercase hex, and exact 32-character lengths.
     """
     if isinstance(line, bytes):
         line = line.decode("ascii", errors="replace")
@@ -145,21 +202,27 @@ def parse_yencryption_line(line: str | bytes) -> Optional[dict[str, Any]]:
         return None
 
     tokens = line.split()
-    params: dict[str, str] = {}
-    for token in tokens[1:]:
-        if "=" in token:
-            k, v = token.split("=", 1)
-            params[k] = v
+    if len(tokens) != 4:
+        return None
+    if tokens[0] != "=yencryption":
+        return None
+    if not tokens[1].startswith("cipher="):
+        return None
+    if not tokens[2].startswith("salt="):
+        return None
+    if not tokens[3].startswith("tag="):
+        return None
 
-    cipher = params.get("cipher")
+    cipher = tokens[1][len("cipher=") :]
     if cipher != "XChaCha20-Poly1305":
         return None
 
-    salt_hex = params.get("salt")
-    tag_hex = params.get("tag")
-    if not salt_hex or len(salt_hex) != 32:
+    salt_hex = tokens[2][len("salt=") :]
+    tag_hex = tokens[3][len("tag=") :]
+
+    if len(salt_hex) != 32 or not all(c in "0123456789abcdef" for c in salt_hex):
         return None
-    if not tag_hex or len(tag_hex) != 32:
+    if len(tag_hex) != 32 or not all(c in "0123456789abcdef" for c in tag_hex):
         return None
 
     try:
@@ -173,6 +236,64 @@ def parse_yencryption_line(line: str | bytes) -> Optional[dict[str, Any]]:
         "salt": salt,
         "tag": tag,
     }
+
+
+def extract_and_remove_yencryption(yenc_block: bytes) -> tuple[dict[str, Any], bytes]:
+    """Extract and remove the single canonical =yencryption line from a restored yEnc article block.
+
+    Validates:
+    - Block has at least 2 lines.
+    - Line 1 starts with b"=ybegin".
+    - If multipart (part= in line 1):
+        - Block has at least 3 lines.
+        - Line 2 starts with b"=ypart".
+        - Line 3 starts with b"=yencryption".
+        - yenc_line_idx is 2 (0-indexed).
+    - If single-part:
+        - Line 2 starts with b"=yencryption".
+        - yenc_line_idx is 1 (0-indexed).
+    - No other line anywhere in the block starts with b"=yencryption".
+    - The =yencryption line conforms strictly to parse_yencryption_line.
+
+    Returns (params_dict, cleaned_yenc_block).
+    """
+    raw_lines = yenc_block.splitlines(keepends=True)
+    if len(raw_lines) < 2:
+        raise ValueError(f"Article block too short: {len(raw_lines)} line(s)")
+
+    line1 = raw_lines[0].lstrip()
+    if not line1.startswith(b"=ybegin"):
+        raise ValueError("Line 1 does not start with =ybegin")
+
+    is_multipart = any(token.startswith(b"part=") for token in line1.split())
+
+    if is_multipart:
+        if len(raw_lines) < 3:
+            raise ValueError(f"Multipart article too short: {len(raw_lines)} line(s)")
+        line2 = raw_lines[1].lstrip()
+        if not line2.startswith(b"=ypart"):
+            raise ValueError("Line 2 in multipart article does not start with =ypart")
+        line3 = raw_lines[2].lstrip()
+        if not line3.startswith(b"=yencryption"):
+            raise ValueError("Line 3 in multipart article does not start with =yencryption")
+        yenc_idx = 2
+    else:
+        line2 = raw_lines[1].lstrip()
+        if not line2.startswith(b"=yencryption"):
+            raise ValueError("Line 2 in single-part article does not start with =yencryption")
+        yenc_idx = 1
+
+    for idx, r_line in enumerate(raw_lines):
+        if idx != yenc_idx and r_line.lstrip().startswith(b"=yencryption"):
+            raise ValueError(f"Duplicate or misplaced =yencryption found at line {idx + 1}")
+
+    yenc_line = raw_lines[yenc_idx]
+    params = parse_yencryption_line(yenc_line)
+    if not params:
+        raise ValueError(f"Malformed =yencryption line: {yenc_line.decode('ascii', errors='replace').strip()}")
+
+    clean_lines = raw_lines[:yenc_idx] + raw_lines[yenc_idx + 1 :]
+    return params, b"".join(clean_lines)
 
 
 class DecryptionAdapter:
@@ -244,6 +365,10 @@ class DecryptionAdapter:
         except Exception as e:
             # Zero-output guarantee: release zero bytes
             raise ValueError(f"Poly1305 authentication failed: {e}") from e
+
+    def encrypt_control_line(self, plaintext: bytes, enc_key: bytes, tweak: bytes, radix: int = 253) -> bytes:
+        """Encrypt a single control line with FF1 over Radix 253."""
+        return ff1_encrypt(enc_key, tweak, plaintext, radix)
 
     def decrypt_control_line(self, ciphertext: bytes, enc_key: bytes, tweak: bytes, radix: int = 253) -> bytes:
         """Decrypt a single control line with FF1 over Radix 253."""

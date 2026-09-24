@@ -183,6 +183,12 @@ class TestDecryptionAdapterContracts:
         assert parsed["salt"] == bytes.fromhex("1a2b3c4d5e6f7890abcdef1234567890")
         assert parsed["tag"] == bytes.fromhex("0cd77ce245a654463f90b945b1d22d5b")
 
+        # 3. extract_and_remove_yencryption basic smoke test
+        block = b"=ybegin line=128 size=10 name=test\r\n=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 tag=0cd77ce245a654463f90b945b1d22d5b\r\ndata\r\n=yend size=10\r\n"
+        p, clean = extract_and_remove_yencryption(block)
+        assert p["cipher"] == "XChaCha20-Poly1305"
+        assert clean == b"=ybegin line=128 size=10 name=test\r\ndata\r\n=yend size=10\r\n"
+
         # Invalid lines
         assert parse_yencryption_line("not an encryption line") is None
         assert parse_yencryption_line("=yencryption cipher=AES salt=123 tag=456") is None
@@ -419,7 +425,7 @@ class TestDirectWriteGatingAndFailover:
         assert decoded_m == bytearray(plaintext)
         assert article_m.decoded_size == len(plaintext)
         assert article_m.file_size == len(ct) * 2
-        assert article_m.data_begin == 1
+        assert article_m.data_begin == 0
         assert article_m.data_size == len(ct)
         assert article_m.crc32 == body_crc
 

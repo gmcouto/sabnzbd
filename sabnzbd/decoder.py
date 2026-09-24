@@ -215,6 +215,78 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
             raise response.sink_error
         raise SinkFailed
 
+    nzf = article.nzf
+
+    password = None
+    if hasattr(article, "nzf") and hasattr(article.nzf, "nzo"):
+        password = getattr(article.nzf.nzo, "password", None)
+    if not password and hasattr(article, "password"):
+        password = article.password
+
+    # Encrypted wire response: sabctools couldn't decode because control lines were FF1-encrypted
+    if response.bytes_decoded == 0 and getattr(response, "lines", None) and password:
+        import io
+        import sabctools
+        from sabnzbd.encryption import DecryptionAdapter, extract_and_remove_yencryption
+
+        lines = [
+            line.encode("latin-1") if isinstance(line, str) else line
+            for line in response.lines
+        ]
+        raw_wire = b"\r\n".join(lines) + b"\r\n"
+
+        adapter = DecryptionAdapter(password=password)
+        segment_index = getattr(article, "segment_index", None) or 1
+
+        restored_block, salt_line1 = adapter.restore_control_lines(raw_wire, segment_index)
+        yenc_params, clean_yenc = extract_and_remove_yencryption(restored_block)
+
+        if yenc_params["salt"] != salt_line1:
+            raise ValueError(
+                f"Salt mismatch between control line 1 ({salt_line1.hex()}) and =yencryption ({yenc_params['salt'].hex()})"
+            )
+
+        art_id = getattr(article, "article", "enc")
+        if isinstance(art_id, str):
+            art_bytes = art_id.encode("ascii", "replace")
+        else:
+            art_bytes = b"enc"
+        clean_wire = b"222 0 <" + art_bytes + b">\r\n" + clean_yenc
+        if not clean_wire.endswith(b"\r\n"):
+            clean_wire += b"\r\n"
+        clean_wire += b".\r\n"
+
+        dec = sabctools.Decoder(len(clean_wire))
+        reader = io.BytesIO(clean_wire)
+        reader.readinto(dec)
+        dec.process(len(clean_wire))
+        sub_resp = next(dec)
+
+        if sub_resp.crc is None:
+            raise ValueError(f"Wire CRC error in encrypted article {getattr(article, 'article', '')}")
+
+        plaintext = adapter.decrypt_body(
+            ciphertext=bytes(sub_resp.data),
+            tag=yenc_params["tag"],
+            salt=yenc_params["salt"],
+            segment_index=segment_index,
+        )
+
+        decoded_data = bytearray(plaintext)
+        article.file_size = sub_resp.file_size
+        article.data_begin = sub_resp.part_begin
+        article.data_size = sub_resp.part_size
+        article.decoded_size = len(decoded_data)
+        article.crc32 = sub_resp.crc
+        nzf.type = "yenc"
+
+        if not nzf.filename_checked and (file_name := sub_resp.file_name):
+            if article.lowest_partnum:
+                nzf.md5of16k = hashlib.md5(memoryview(decoded_data)[:16384]).digest()
+            nzf.nzo.verify_nzf_filename(nzf, file_name)
+
+        return decoded_data
+
     # Let SABCTools do all the heavy lifting
     decoded_data = response.data
     article.file_size = response.file_size
@@ -222,7 +294,6 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
     article.data_size = response.part_size
     article.decoded_size = response.bytes_decoded
 
-    nzf = article.nzf
     # Assume it is yenc
     nzf.type = "yenc"
 
