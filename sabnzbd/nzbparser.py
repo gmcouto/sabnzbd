@@ -378,6 +378,52 @@ def process_single_nzb(
     return result, nzo_ids
 
 
+UINT32_MAX = 4294967295
+
+
+def parse_file_counter(subject: str) -> tuple[Optional[int], Optional[int], str]:
+    """Parse leading [N/M] - file counter from subject.
+
+    Returns (file_ordinal, total_files, residual_subject).
+    If prefix is absent, malformed, non-ASCII, zero, or overflow, returns (None, None, subject).
+    """
+    if not subject.startswith("["):
+        return None, None, subject
+
+    bracket_close = subject.find("]")
+    if bracket_close == -1:
+        return None, None, subject
+
+    counter_str = subject[1:bracket_close]
+    after = subject[bracket_close + 1 :]
+
+    # Must be followed by " - "
+    if not after.startswith(" - "):
+        return None, None, subject
+    residual = after[3:]
+
+    # Counter must contain exactly one "/"
+    parts = counter_str.split("/")
+    if len(parts) != 2:
+        return None, None, subject
+
+    n_str, m_str = parts[0], parts[1]
+    if not (n_str.isascii() and n_str.isdigit() and m_str.isascii() and m_str.isdigit()):
+        return None, None, subject
+
+    try:
+        n = int(n_str)
+        m = int(m_str)
+    except ValueError:
+        return None, None, subject
+
+    # Must be one-based uint32
+    if n <= 0 or m <= 0 or n > UINT32_MAX or m > UINT32_MAX:
+        return None, None, subject
+
+    return n, m, residual
+
+
 def nzbfile_parser(full_nzb_path: str, nzo):
     # For type-hinting
     nzo: NzbObject
@@ -392,6 +438,7 @@ def nzbfile_parser(full_nzb_path: str, nzo):
     time_now = time.time()
     skipped_files = 0
     valid_files = 0
+    parsed_files = []
 
     # Use nzb.gz file from admin dir
     with gzip.open(full_nzb_path) as nzb_fh:
@@ -414,7 +461,8 @@ def nzbfile_parser(full_nzb_path: str, nzo):
                             nzo.meta[meta_type] = []
                         nzo.meta[meta_type].append(meta.text)
                 element.clear()
-                logging.debug("NZB file meta-data = %s", nzo.meta)
+                safe_meta = {k: ("<redacted>" if k.lower() == "password" else v) for k, v in nzo.meta.items()}
+                logging.debug("NZB file meta-data = %s", safe_meta)
                 continue
 
             # Parse the files
@@ -477,23 +525,94 @@ def nzbfile_parser(full_nzb_path: str, nzo):
                 # Skip any empty files
                 if not raw_article_db:
                     logging.info("No valid articles in %s, skipping", file_name)
+                    element.clear()
                     continue
 
-                # Get the articles, making sure to sort the articles by part number
-                raw_article_db_sorted = [raw_article_db[partnum] for partnum in sorted(raw_article_db)]
-
-                # Create NZF
-                try:
-                    nzf = NzbFile(file_date, file_name, raw_article_db_sorted, file_bytes, nzo)
-                except SkippedNzbFile:
-                    # Did not meet requirements, so continue
-                    skipped_files += 1
-                    continue
-
-                nzo.add_nzf(nzf)
-                valid_files += 1
-                avg_age_sum += file_timestamp
+                file_ord, total_files, residual = parse_file_counter(file_name)
+                sorted_articles = [
+                    (article_id, segment_size, partnum)
+                    for partnum, (article_id, segment_size) in sorted(raw_article_db.items())
+                ]
+                parsed_files.append(
+                    {
+                        "date": file_date,
+                        "timestamp": file_timestamp,
+                        "file_name": residual,
+                        "bytes": file_bytes,
+                        "file_ord": file_ord,
+                        "total_files": total_files,
+                        "raw_articles": sorted_articles,
+                    }
+                )
                 element.clear()
+
+        # Reconstruct segment identity across the release
+        total_parsed = len(parsed_files)
+        has_valid_identity = (
+            total_parsed > 0
+            and all(f["file_ord"] is not None and f["total_files"] is not None for f in parsed_files)
+            and all(f["total_files"] == total_parsed for f in parsed_files)
+            and {f["file_ord"] for f in parsed_files} == set(range(1, total_parsed + 1))
+        )
+
+        if has_valid_identity:
+            # Check declared parts per file: must be contiguous 1..len(raw_articles)
+            for f in parsed_files:
+                parts = [art[2] for art in f["raw_articles"]]
+                if not parts or parts != list(range(1, len(parts) + 1)):
+                    has_valid_identity = False
+                    break
+
+        file_bases = {}
+        if has_valid_identity:
+            # Map files by ordinal to compute prefix sums
+            files_by_ord = {f["file_ord"]: f for f in parsed_files}
+            prefix_sum = 0
+            for ord_num in range(1, total_parsed + 1):
+                f_item = files_by_ord[ord_num]
+                part_count = len(f_item["raw_articles"])
+                base = prefix_sum + 1
+                if base + part_count - 1 > UINT32_MAX:
+                    has_valid_identity = False
+                    break
+                file_bases[ord_num] = base
+                prefix_sum += part_count
+
+        # Build final raw_article_db_sorted and create NzbFiles
+        for f in parsed_files:
+            file_ord = f["file_ord"] if has_valid_identity else None
+            total_files = f["total_files"] if has_valid_identity else None
+            base = file_bases.get(f["file_ord"]) if has_valid_identity else None
+
+            raw_article_db_sorted = [
+                (
+                    art[0],
+                    art[1],
+                    art[2],
+                    (base + art[2] - 1) if base is not None else None,
+                )
+                for art in f["raw_articles"]
+            ]
+
+            try:
+                nzf = NzbFile(
+                    f["date"],
+                    f["file_name"],
+                    raw_article_db_sorted,
+                    f["bytes"],
+                    nzo,
+                    file_ordinal=file_ord,
+                    total_files=total_files,
+                    segment_index_base=base,
+                )
+            except SkippedNzbFile:
+                # Did not meet requirements, so continue
+                skipped_files += 1
+                continue
+
+            nzo.add_nzf(nzf)
+            valid_files += 1
+            avg_age_sum += f["timestamp"]
 
     # Final bookkeeping
     nr_files = max(1, valid_files)

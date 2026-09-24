@@ -214,6 +214,139 @@ class TestNzbParser:
         assert f.decodetable[0].part_number == 1
         assert f.decodetable[0].segment_index is None
 
+        # Duplicate ordinals: two files with [1/2]
+        xml_dup = """<?xml version="1.0" encoding="utf-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
+ <file poster="p@test.com" date="1600000000" subject="[1/2] - &quot;f1.bin&quot; yEnc (1/1)">
+  <segments><segment bytes="1000" number="1">m1@test</segment></segments>
+ </file>
+ <file poster="p@test.com" date="1600000000" subject="[1/2] - &quot;f2.bin&quot; yEnc (1/1)">
+  <segments><segment bytes="1000" number="1">m2@test</segment></segments>
+ </file>
+</nzb>"""
+        nzb_file = _write_nzb_gz(SAB_CACHE_DIR, "test_dup", xml_dup)
+        nzo = NzbObject("test_dup")
+        nzbparser.nzbfile_parser(nzb_file, nzo)
+        for f_item in nzo.files:
+            f_item.finish_import()
+            assert f_item.file_ordinal is None
+            assert f_item.segment_index_base is None
+            assert f_item.decodetable[0].segment_index is None
+
+        # Zero ordinal: [0/2]
+        xml_zero = """<?xml version="1.0" encoding="utf-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
+ <file poster="p@test.com" date="1600000000" subject="[0/2] - &quot;f0.bin&quot; yEnc (1/1)">
+  <segments><segment bytes="1000" number="1">m0@test</segment></segments>
+ </file>
+ <file poster="p@test.com" date="1600000000" subject="[1/2] - &quot;f1.bin&quot; yEnc (1/1)">
+  <segments><segment bytes="1000" number="1">m1@test</segment></segments>
+ </file>
+</nzb>"""
+        nzb_file = _write_nzb_gz(SAB_CACHE_DIR, "test_zero", xml_zero)
+        nzo = NzbObject("test_zero")
+        nzbparser.nzbfile_parser(nzb_file, nzo)
+        for f_item in nzo.files:
+            f_item.finish_import()
+            assert f_item.file_ordinal is None
+            assert f_item.segment_index_base is None
+            assert f_item.decodetable[0].segment_index is None
+
+        # Inconsistent totals: [1/2] and [2/3]
+        xml_inconsistent = """<?xml version="1.0" encoding="utf-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
+ <file poster="p@test.com" date="1600000000" subject="[1/2] - &quot;f1.bin&quot; yEnc (1/1)">
+  <segments><segment bytes="1000" number="1">m1@test</segment></segments>
+ </file>
+ <file poster="p@test.com" date="1600000000" subject="[2/3] - &quot;f2.bin&quot; yEnc (1/1)">
+  <segments><segment bytes="1000" number="1">m2@test</segment></segments>
+ </file>
+</nzb>"""
+        nzb_file = _write_nzb_gz(SAB_CACHE_DIR, "test_inconsistent", xml_inconsistent)
+        nzo = NzbObject("test_inconsistent")
+        nzbparser.nzbfile_parser(nzb_file, nzo)
+        for f_item in nzo.files:
+            f_item.finish_import()
+            assert f_item.file_ordinal is None
+            assert f_item.segment_index_base is None
+            assert f_item.decodetable[0].segment_index is None
+
+        # Overflow ordinal: [4294967296/2]
+        xml_overflow = """<?xml version="1.0" encoding="utf-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
+ <file poster="p@test.com" date="1600000000" subject="[4294967296/2] - &quot;f1.bin&quot; yEnc (1/1)">
+  <segments><segment bytes="1000" number="1">m1@test</segment></segments>
+ </file>
+</nzb>"""
+        nzb_file = _write_nzb_gz(SAB_CACHE_DIR, "test_overflow", xml_overflow)
+        nzo = NzbObject("test_overflow")
+        nzbparser.nzbfile_parser(nzb_file, nzo)
+        f = nzo.files[0]
+        f.finish_import()
+        assert f.file_ordinal is None
+        assert f.segment_index_base is None
+        assert f.decodetable[0].segment_index is None
+
+        # N > M: [3/2]
+        xml_gt = """<?xml version="1.0" encoding="utf-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
+ <file poster="p@test.com" date="1600000000" subject="[3/2] - &quot;f1.bin&quot; yEnc (1/1)">
+  <segments><segment bytes="1000" number="1">m1@test</segment></segments>
+ </file>
+ <file poster="p@test.com" date="1600000000" subject="[1/2] - &quot;f2.bin&quot; yEnc (1/1)">
+  <segments><segment bytes="1000" number="1">m2@test</segment></segments>
+ </file>
+</nzb>"""
+        nzb_file = _write_nzb_gz(SAB_CACHE_DIR, "test_gt", xml_gt)
+        nzo = NzbObject("test_gt")
+        nzbparser.nzbfile_parser(nzb_file, nzo)
+        for f_item in nzo.files:
+            f_item.finish_import()
+            assert f_item.file_ordinal is None
+            assert f_item.segment_index_base is None
+            assert f_item.decodetable[0].segment_index is None
+
+    @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
+    def test_reconstruct_identity_repeated_parse_identical(self):
+        """Repeated parse yields the exact same complete assignment."""
+        xml = """<?xml version="1.0" encoding="utf-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
+ <file poster="p@test.com" date="1600000000" subject="[1/2] - &quot;file1.bin&quot; yEnc (1/2)">
+  <segments>
+   <segment bytes="1000" number="1">p1_1@test</segment>
+   <segment bytes="1000" number="2">p1_2@test</segment>
+  </segments>
+ </file>
+ <file poster="p@test.com" date="1600000000" subject="[2/2] - &quot;file2.bin&quot; yEnc (1/1)">
+  <segments>
+   <segment bytes="1000" number="1">p2_1@test</segment>
+  </segments>
+ </file>
+</nzb>"""
+        nzb_file = _write_nzb_gz(SAB_CACHE_DIR, "test_repeat", xml)
+
+        nzo1 = NzbObject("test_repeat_1")
+        nzbparser.nzbfile_parser(nzb_file, nzo1)
+        for f in nzo1.files:
+            f.finish_import()
+
+        nzo2 = NzbObject("test_repeat_2")
+        nzbparser.nzbfile_parser(nzb_file, nzo2)
+        for f in nzo2.files:
+            f.finish_import()
+
+        f1_1 = {f.filename: f for f in nzo1.files}["file1.bin"]
+        f1_2 = {f.filename: f for f in nzo2.files}["file1.bin"]
+        assert f1_1.file_ordinal == f1_2.file_ordinal == 1
+        assert f1_1.segment_index_base == f1_2.segment_index_base == 1
+        assert [a.segment_index for a in f1_1.decodetable] == [a.segment_index for a in f1_2.decodetable] == [1, 2]
+
+        f2_1 = {f.filename: f for f in nzo1.files}["file2.bin"]
+        f2_2 = {f.filename: f for f in nzo2.files}["file2.bin"]
+        assert f2_1.file_ordinal == f2_2.file_ordinal == 2
+        assert f2_1.segment_index_base == f2_2.segment_index_base == 3
+        assert [a.segment_index for a in f2_1.decodetable] == [a.segment_index for a in f2_2.decodetable] == [3]
+
     @pytest.mark.xfail(reason="These tests should be added")
     def test_nzbparser_bad_stuff(self):
         # TODO: Add tests for:

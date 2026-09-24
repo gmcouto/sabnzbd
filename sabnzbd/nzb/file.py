@@ -68,6 +68,9 @@ NzbFileSaver = (
     "crc32",
     "assembled",
     "md5of16k",
+    "file_ordinal",
+    "total_files",
+    "segment_index_base",
 )
 
 
@@ -77,7 +80,17 @@ class NzbFile(TryList):
     # Pre-define attributes to save memory
     __slots__ = (*NzbFileSaver, "lock", "file_lock", "assembler_next_index", "writer")
 
-    def __init__(self, date, subject, raw_article_db, file_bytes, nzo):
+    def __init__(
+        self,
+        date,
+        subject,
+        raw_article_db,
+        file_bytes,
+        nzo,
+        file_ordinal: Optional[int] = None,
+        total_files: Optional[int] = None,
+        segment_index_base: Optional[int] = None,
+    ):
         """Setup object"""
         super().__init__()
         self.lock: threading.RLock = threading.RLock()
@@ -89,6 +102,10 @@ class NzbFile(TryList):
         self.filename: str = sanitize_filename(subject_name_extractor(subject))
         self.filename_checked = False
         self.filepath: Optional[str] = None
+
+        self.file_ordinal: Optional[int] = file_ordinal
+        self.total_files: Optional[int] = total_files
+        self.segment_index_base: Optional[int] = segment_index_base
 
         # Identifiers for par2 files
         self.is_par2: bool = False
@@ -167,7 +184,15 @@ class NzbFile(TryList):
     @synchronized()
     def add_article(self, article_info):
         """Add article to object database and return article object"""
-        article = Article(article_info[0], article_info[1], self)
+        part_number = article_info[2] if len(article_info) > 2 else None
+        segment_index = article_info[3] if len(article_info) > 3 else None
+        article = Article(
+            article_info[0],
+            article_info[1],
+            self,
+            part_number=part_number,
+            segment_index=segment_index,
+        )
         article.on_disk = self.assembled
         self.articles[article] = article
         self.decodetable.append(article)

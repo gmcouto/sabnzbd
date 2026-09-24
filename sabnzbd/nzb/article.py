@@ -98,6 +98,8 @@ ArticleSaver = (
     "nzf",
     "crc32",
     "decoded_size",
+    "part_number",
+    "segment_index",
 )
 
 
@@ -107,7 +109,14 @@ class Article(TryList):
     # Pre-define attributes to save memory
     __slots__ = (*ArticleSaver, "fetcher", "fetcher_priority", "tries", "lock")
 
-    def __init__(self, article, article_bytes, nzf):
+    def __init__(
+        self,
+        article,
+        article_bytes,
+        nzf,
+        part_number: Optional[int] = None,
+        segment_index: Optional[int] = None,
+    ):
         super().__init__()
         self.article: str = article
         self.art_id: Optional[str] = None
@@ -127,6 +136,8 @@ class Article(TryList):
         self.nzf: sabnzbd.nzb.NzbFile = nzf  # NzbFile reference
         # Share NzbFile lock for file-wide atomicity of try-list ops
         self.lock: threading.RLock = nzf.lock
+        self.part_number: Optional[int] = part_number
+        self.segment_index: Optional[int] = segment_index
 
     @synchronized()
     def reset_try_list(self):
