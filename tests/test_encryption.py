@@ -29,7 +29,6 @@ from sabnzbd.encryption import (
     parse_yencryption_line,
     byte_to_numeral,
     numeral_to_byte,
-    ff1_decrypt,
 )
 
 
@@ -66,7 +65,7 @@ class TestDecryptionAdapterContracts:
         adapter = DecryptionAdapter(password="test123")
         salt = bytes.fromhex("1a2b3c4d5e6f7890abcdef1234567890")
 
-        with mock.patch("argon2.low_level.hash_secret_raw", wraps=adapter._derive_argon2id) as mock_kdf:
+        with mock.patch.object(adapter, "_derive_argon2id", wraps=adapter._derive_argon2id) as mock_kdf:
             k1 = adapter.get_master_key(salt)
             k2 = adapter.get_master_key(salt)
             assert k1 == k2
@@ -155,3 +154,31 @@ class TestDecryptionAdapterContracts:
 
                 pt_line = adapter.decrypt_control_line(ct, enc_key, tweak)
                 assert pt_line == expected_pt_line, f"Control line mismatch for {vec['id']}"
+
+    def test_numeral_bijection_and_parser(self):
+        """Test byte_to_numeral, numeral_to_byte, and parse_yencryption_line."""
+        # 1. Numeral bijection
+        for b in range(1, 256):
+            if b in (0x0A, 0x0D):
+                with pytest.raises(ValueError):
+                    byte_to_numeral(b)
+            else:
+                num = byte_to_numeral(b)
+                assert 0 <= num <= 252
+                assert numeral_to_byte(num) == b
+
+        with pytest.raises(ValueError):
+            byte_to_numeral(0x00)
+
+        # 2. Parser
+        line = "=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 tag=0cd77ce245a654463f90b945b1d22d5b"
+        parsed = parse_yencryption_line(line)
+        assert parsed is not None
+        assert parsed["cipher"] == "XChaCha20-Poly1305"
+        assert parsed["salt"] == bytes.fromhex("1a2b3c4d5e6f7890abcdef1234567890")
+        assert parsed["tag"] == bytes.fromhex("0cd77ce245a654463f90b945b1d22d5b")
+
+        # Invalid lines
+        assert parse_yencryption_line("not an encryption line") is None
+        assert parse_yencryption_line("=yencryption cipher=AES salt=123 tag=456") is None
+
