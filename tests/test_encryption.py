@@ -237,6 +237,30 @@ class TestDecryptionAdapterContracts:
                 pt_line = adapter.decrypt_control_line(ct, enc_key, tweak)
                 assert pt_line == expected_pt_line, f"Control line mismatch for {vec['id']}"
 
+    def test_nonce_and_tweak_vectors(self):
+        """Verify VEC-02: HMAC-SHA256 body nonce and control tweak derivations against nonce_tweak.json."""
+        vector_dir = _get_test_vector_dir()
+        with open(vector_dir / "nonce_tweak.json", "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        adapter = DecryptionAdapter(password="test123")
+
+        # 1. Body nonce vectors (24 bytes via 19-byte HMAC message)
+        for vec in data["body_nonce_vectors"]:
+            key = bytes.fromhex(vec["key_hex"])
+            segment_index = vec["segment_index"]
+            nonce = adapter.derive_body_nonce(key, segment_index)
+            assert nonce.hex() == vec["expected_nonce_hex"], f"Nonce mismatch for {vec['id']}"
+
+        # 2. Control tweak vectors (32-byte encKey and 8-byte tweak)
+        for vec in data["control_tweak_vectors"]:
+            master_key = bytes.fromhex(vec["master_key_hex"])
+            segment_index = vec["segment_index"]
+            line_index = vec["line_index"]
+            enc_key, tweak = adapter.derive_control_keys(master_key, segment_index, line_index)
+            assert enc_key.hex() == vec["enc_key_hex"], f"Enc key mismatch for {vec['id']}"
+            assert tweak.hex() == vec["expected_tweak_hex"], f"Tweak mismatch for {vec['id']}"
+
     def test_numeral_bijection_and_parser(self):
         """Test byte_to_numeral, numeral_to_byte, and parse_yencryption_line."""
         # 1. Numeral bijection
