@@ -48,6 +48,14 @@ python3 tools/make_mo.py
 
 Our many other command line options are explained in depth [here](https://sabnzbd.org/wiki/advanced/command-line-parameters).
 
+## yEnc Header and Body Decryption
+
+SABnzbd supports downloading releases protected by yEnc body and control-line encryption (XChaCha20-Poly1305 and Radix 253 FF1).
+
+- **Automatic Decryption**: Encrypted NZBs containing `<meta type="yenc_encrypted">true</meta>` and `<meta type="password">` decrypt automatically without manual interaction.
+- **Manual Password Entry**: For encrypted releases without embedded passwords, passwords can be provided through the Web UI (Queue item edit / Password field) or via API (`addfile` / `addurl` with `password` parameter).
+- **Security & Integrity**: Direct-write streaming is gated for encrypted releases to prevent unauthenticated ciphertext from reaching disk, and authentication failures trigger Usenet multi-server failover before failing the article.
+
 ## About Our Repo
 
 The workflow we use, is a simplified form of "GitFlow".
