@@ -298,71 +298,69 @@ class TestDecryptionAdapterContracts:
 class TestDirectWriteGatingAndFailover:
     """Test suite verifying direct-write gating and authentication error routing."""
 
-    def test_direct_write_gated(self):
-        """article_sink returns None for password-bearing releases, enabling direct-write only for plain releases."""
-        # Mock server instance
+    def test_direct_write_gated_differentiation(self):
+        """article_sink gates encrypted releases and preserves archive-password direct-write."""
         wrapper = mock.MagicMock(spec=NewsWrapper)
+        mock_monitor = mock.MagicMock(allow_direct_decode=True)
+        mock_writer = mock.MagicMock()
+        mock_assembler = mock.MagicMock()
+        mock_assembler.get_writer.return_value = mock_writer
 
-        # 1. Password-bearing article: direct-write must be refused (return None)
         article_enc = mock.MagicMock(spec=Article)
-        article_enc.nzf.nzo.password = "secret_password"
+        article_enc.nzf.nzo.yenc_encrypted = True
+        article_enc.segment_index = 1
         article_enc.nzf.type = "yenc"
         article_enc.lowest_partnum = False
         article_enc.nzf.prepare_filepath.return_value = True
 
-        mock_monitor = mock.MagicMock(allow_direct_decode=True)
         with (
             mock.patch.object(sabnzbd.cfg, "direct_decode", return_value=True),
             mock.patch.object(sabnzbd.cfg, "direct_write", return_value=True),
             mock.patch.object(sabnzbd, "WriteMonitor", mock_monitor, create=True),
         ):
-            sink = NewsWrapper.article_sink(wrapper, article_enc)
-            assert sink is None, "Expected direct-write to be refused for password-bearing release"
+            assert NewsWrapper.article_sink(wrapper, article_enc) is None
 
-        # 2. Unencrypted article: direct-write allowed when configured
-        article_plain = mock.MagicMock(spec=Article)
-        article_plain.nzf.nzo.password = None
-        article_plain.password = None
-        article_plain.nzf.type = "yenc"
-        article_plain.lowest_partnum = False
-        article_plain.nzf.prepare_filepath.return_value = True
-        mock_writer = mock.MagicMock()
+        article_archive = mock.MagicMock(spec=Article)
+        article_archive.nzf.nzo.yenc_encrypted = False
+        article_archive.nzf.nzo.password = "rarpass"
+        article_archive.segment_index = None
+        article_archive.nzf.type = "yenc"
+        article_archive.lowest_partnum = False
+        article_archive.nzf.prepare_filepath.return_value = True
 
-        mock_assembler = mock.MagicMock()
-        mock_assembler.get_writer.return_value = mock_writer
         with (
             mock.patch.object(sabnzbd.cfg, "direct_decode", return_value=True),
             mock.patch.object(sabnzbd.cfg, "direct_write", return_value=True),
             mock.patch.object(sabnzbd, "WriteMonitor", mock_monitor, create=True),
             mock.patch.object(sabnzbd, "Assembler", mock_assembler, create=True),
         ):
-            sink = NewsWrapper.article_sink(wrapper, article_plain)
-            assert sink == mock_writer, "Expected direct-write sink to be returned for plain release"
+            assert NewsWrapper.article_sink(wrapper, article_archive) == mock_writer
 
-        # 3. Article with article.password set directly: direct-write must also be refused
-        article_pwd = mock.MagicMock(spec=Article)
-        article_pwd.nzf.nzo.password = None
-        article_pwd.password = "direct_pass"
-        article_pwd.nzf.type = "yenc"
-        article_pwd.lowest_partnum = False
-        article_pwd.nzf.prepare_filepath.return_value = True
+        article_indexed = mock.MagicMock(spec=Article)
+        article_indexed.nzf.nzo.yenc_encrypted = False
+        article_indexed.segment_index = 2
+        article_indexed.nzf.type = "yenc"
+        article_indexed.lowest_partnum = False
+        article_indexed.nzf.prepare_filepath.return_value = True
+
         with (
             mock.patch.object(sabnzbd.cfg, "direct_decode", return_value=True),
             mock.patch.object(sabnzbd.cfg, "direct_write", return_value=True),
             mock.patch.object(sabnzbd, "WriteMonitor", mock_monitor, create=True),
         ):
-            sink = NewsWrapper.article_sink(wrapper, article_pwd)
-            assert sink is None, "Expected direct-write to be refused when article.password is set"
+            assert NewsWrapper.article_sink(wrapper, article_indexed) is None
 
     def test_downloader_decode_candidate_dispatch(self):
         """Downloader.decode forwards candidate encrypted responses to decoder instead of discarding."""
         from sabnzbd.downloader import Downloader
         import sabctools
 
-        # Case 1: Candidate encrypted article (bytes_decoded == 0, lines present, password present)
+        # Case 1: Candidate encrypted article (bytes_decoded == 0, lines and encryption provenance present)
         art_cand = mock.MagicMock(spec=Article)
         art_cand.fetcher.id = 1
         art_cand.nzf.nzo.password = "secret_pass"
+        art_cand.nzf.nzo.yenc_encrypted = True
+        art_cand.segment_index = 1
         art_cand.nzf.nzo.precheck = False
 
         resp_cand = mock.MagicMock(spec=sabctools.NNTPResponse)
@@ -379,11 +377,12 @@ class TestDirectWriteGatingAndFailover:
             assert not art_cand.search_new_server.called
             assert not art_cand.nzf.nzo.increase_bad_articles_counter.called
 
-        # Case 2: Broken unencrypted article (bytes_decoded == 0, lines present, but NO password)
+        # Case 2: Broken archive-password article is not transport encrypted
         art_broken = mock.MagicMock(spec=Article)
         art_broken.fetcher.id = 1
-        art_broken.nzf.nzo.password = None
-        art_broken.password = None
+        art_broken.nzf.nzo.password = "rarpass"
+        art_broken.nzf.nzo.yenc_encrypted = False
+        art_broken.segment_index = None
         art_broken.nzf.nzo.precheck = False
         art_broken.search_new_server.return_value = False
 
@@ -401,6 +400,64 @@ class TestDirectWriteGatingAndFailover:
             assert not mock_decoder_decode.called, "Broken article must not be forwarded to decoder.decode"
             assert art_broken.search_new_server.called
             assert art_broken.nzf.nzo.increase_bad_articles_counter.called
+
+    def test_missing_segment_index_fails_closed(self):
+        """Encrypted articles without explicit segment identity release no output."""
+        import sabctools
+        import sabnzbd.decoder as decoder
+
+        article = mock.MagicMock(spec=Article)
+        article.article = "missing@index"
+        article.nzf.nzo.password = "secret"
+        article.nzf.nzo.yenc_encrypted = True
+        article.nzf.nzo.precheck = False
+        article.segment_index = None
+        article.search_new_server.return_value = True
+        article.on_disk = False
+
+        response = mock.MagicMock(spec=sabctools.NNTPResponse)
+        response.sink_failed = False
+        response.format = sabctools.EncodingFormat.YENC
+        response.bytes_decoded = 0
+        response.lines = ["encrypted_line"]
+
+        with pytest.raises(ValueError, match="Missing explicit segment_index"):
+            decoder.decode_yenc(article, response)
+
+        mock_cache = mock.MagicMock()
+        mock_queue = mock.MagicMock()
+        with (
+            mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
+            mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
+        ):
+            decoder.decode(article, response)
+            assert article.search_new_server.called
+            assert not mock_cache.save_article.called
+            assert not article.on_disk
+
+    @pytest.mark.parametrize("line", ["ordinary yEnc data", b"ordinary yEnc data"])
+    def test_ordinary_yenc_lines_accept_text_and_bytes(self, line):
+        """Encryption probing preserves ordinary responses regardless of line representation."""
+        import sabctools
+        import sabnzbd.decoder as decoder
+
+        article = mock.MagicMock(spec=Article)
+        article.nzf.filename_checked = True
+        article.lowest_partnum = False
+
+        response = mock.MagicMock(spec=sabctools.NNTPResponse)
+        response.sink_failed = False
+        response.data = bytearray(b"plain decoded data")
+        response.file_size = len(response.data)
+        response.part_begin = 0
+        response.part_size = len(response.data)
+        response.bytes_decoded = len(response.data)
+        response.file_name = "plain.bin"
+        response.crc = 0x12345678
+        response.lines = [line]
+        response.yencryption = None
+
+        assert decoder.decode_yenc(article, response) == response.data
 
     def test_auth_failure_triggers_server_search(self):
         """Poly1305 authentication error in decode() triggers search_new_server without unhandled crash."""
@@ -900,6 +957,7 @@ class TestDirectWriteGatingAndFailover:
 
             mock_nzo = mock.MagicMock()
             mock_nzo.password = password
+            mock_nzo.yenc_encrypted = True
             mock_nzo.precheck = False
             mock_nzo.removed_from_queue = False
             mock_nzo.status = "active"

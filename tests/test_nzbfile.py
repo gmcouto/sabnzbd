@@ -200,3 +200,38 @@ class TestNzbFile:
         for article in nzf_restored.decodetable:
             assert article.lock == nzf_restored.lock
 
+    def test_lazy_tuples_and_pickle_persistence(self):
+        """4-tuples (mid, size, part, segment_index) survive disk save_data, load_data, and pickle round trips."""
+        nzo = NzbObject("test_pickle_identity")
+        nzo.yenc_encrypted = True
+        nzf = NzbFile(
+            date=datetime.now(),
+            subject="test.bin",
+            raw_article_db=[
+                ("mid1@test", 1000, 1, 42),
+                ("mid2@test", 1000, 2, 43),
+            ],
+            file_bytes=2000,
+            nzo=nzo,
+        )
+        assert nzf.decodetable[0].segment_index == 42
+        assert nzf.decodetable[0].part_number == 1
+        assert not nzf.import_finished
+
+        # Finish import to load remaining from admin disk
+        nzf.finish_import()
+        assert nzf.import_finished
+        assert len(nzf.decodetable) == 2
+        assert nzf.decodetable[1].segment_index == 43
+        assert nzf.decodetable[1].part_number == 2
+
+        # Round trip Article
+        art_restored: Article = pickle.loads(pickle.dumps(nzf.decodetable[0]))
+        assert art_restored.article == "mid1@test"
+        assert art_restored.part_number == 1
+        assert art_restored.segment_index == 42
+
+        # Round trip NzbObject
+        nzo_restored: NzbObject = pickle.loads(pickle.dumps(nzo))
+        assert nzo_restored.yenc_encrypted is True
+

@@ -20,6 +20,7 @@ tests.test_nzbparser - Tests of basic NZB parsing
 """
 
 import gzip
+import json
 import os
 import pytest
 from tests.testhelper import SAB_CACHE_DIR, SAB_DATA_DIR, create_and_read_nzb_fp
@@ -76,276 +77,96 @@ class TestNzbParser:
             assert [metadata[field]] == nzo.meta[field]
 
     @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
-    def test_reconstruct_identity_shuffled_files(self):
-        """Shuffled XML files reconstruct indices by [N/M], not parse or nzo.files order."""
-        xml = """<?xml version="1.0" encoding="utf-8"?>
-<!DOCTYPE nzb PUBLIC "-//newzBin//DTD NZB 1.1//EN" "http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
-<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
- <head>
-  <meta type="password">secret123</meta>
- </head>
- <file poster="p@test.com" date="1600000000" subject="[2/2] - &quot;file2.bin&quot; yEnc (1/2)">
-  <groups><group>alt.binaries.test</group></groups>
-  <segments>
-   <segment bytes="1000" number="1">msg2_1@test</segment>
-   <segment bytes="1000" number="2">msg2_2@test</segment>
-  </segments>
- </file>
- <file poster="p@test.com" date="1600000000" subject="[1/2] - &quot;file1.bin&quot; yEnc (1/3)">
-  <groups><group>alt.binaries.test</group></groups>
-  <segments>
-   <segment bytes="1000" number="1">msg1_1@test</segment>
-   <segment bytes="1000" number="2">msg1_2@test</segment>
-   <segment bytes="1000" number="3">msg1_3@test</segment>
-  </segments>
- </file>
-</nzb>"""
-        nzb_file = _write_nzb_gz(SAB_CACHE_DIR, "test_shuffled", xml)
-        nzo = NzbObject("test_shuffled")
-        nzbparser.nzbfile_parser(nzb_file, nzo)
+    def test_nzb_segment_identity_conformance(self):
+        vectors_path = os.path.join(
+            os.path.dirname(__file__),
+            "../../yenc-encryption-standards/test-vectors/nzb_segment_identity.json",
+        )
+        with open(vectors_path, encoding="utf-8") as vectors_file:
+            vectors = json.load(vectors_file)["vectors"]
 
-        # Map by filename
-        files_by_name = {f.filename: f for f in nzo.files}
-        assert "file1.bin" in files_by_name
-        assert "file2.bin" in files_by_name
+        assert len(vectors) == 33
 
-        f1 = files_by_name["file1.bin"]
-        f2 = files_by_name["file2.bin"]
+        for vector in vectors:
+            vector_id = vector["id"]
+            category = vector["category"]
+            nzb_file = _write_nzb_gz(SAB_CACHE_DIR, f"test_{vector_id}", vector["nzb_xml"])
+            nzo = NzbObject(f"job_{vector_id}")
 
-        assert f1.file_ordinal == 1
-        assert f1.total_files == 2
-        assert f1.segment_index_base == 1
+            if category == "invalid_identity":
+                if vector_id == "nzb-invalid-17-missing-index-encrypted":
+                    nzbparser.nzbfile_parser(nzb_file, nzo)
+                    assert nzo.yenc_encrypted is False
+                    nzo = NzbObject(f"job_{vector_id}_forced")
+                    with pytest.raises(ValueError, match="MISSING_SEGMENT_INDEX"):
+                        nzbparser.nzbfile_parser(nzb_file, nzo, force_encrypted=True)
+                else:
+                    with pytest.raises(ValueError, match=vector["expected_error"]):
+                        nzbparser.nzbfile_parser(nzb_file, nzo)
+                continue
 
-        assert f2.file_ordinal == 2
-        assert f2.total_files == 2
-        assert f2.segment_index_base == 4
+            nzbparser.nzbfile_parser(nzb_file, nzo)
+            for nzf in nzo.files:
+                nzf.finish_import()
 
-        # Finish import to load all lazy articles
-        f1.finish_import()
-        f2.finish_import()
+            if category == "unencrypted_compatibility":
+                assert nzo.yenc_encrypted is False
+                assert all(art.segment_index is None for nzf in nzo.files for art in nzf.decodetable)
+                continue
 
-        # Check f1 articles: part 1 -> 1, part 2 -> 2, part 3 -> 3
-        assert len(f1.decodetable) == 3
-        assert f1.decodetable[0].part_number == 1
-        assert f1.decodetable[0].segment_index == 1
-        assert f1.decodetable[1].part_number == 2
-        assert f1.decodetable[1].segment_index == 2
-        assert f1.decodetable[2].part_number == 3
-        assert f1.decodetable[2].segment_index == 3
-
-        # Check f2 articles: part 1 -> 4, part 2 -> 5
-        assert len(f2.decodetable) == 2
-        assert f2.decodetable[0].part_number == 1
-        assert f2.decodetable[0].segment_index == 4
-        assert f2.decodetable[1].part_number == 2
-        assert f2.decodetable[1].segment_index == 5
-
-        # Also verify post-parse sort_nzfs does not affect attached identity
-        nzo.sort_nzfs()
-        assert f1.file_ordinal == 1
-        assert f1.segment_index_base == 1
-        assert f2.file_ordinal == 2
-        assert f2.segment_index_base == 4
+            assert nzo.yenc_encrypted is True
+            if category == "valid_identity":
+                expected = {segment["message_id"]: segment["segment_index"] for segment in vector["expected_segments"]}
+                actual = {
+                    art.article.strip("<>"): art.segment_index
+                    for nzf in nzo.files
+                    for art in nzf.decodetable
+                }
+                assert actual == expected
+            else:
+                assert all(art.segment_index is not None for nzf in nzo.files for art in nzf.decodetable)
 
     @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
-    def test_reconstruct_identity_rejects_inconsistent_or_missing(self):
-        """Duplicate ordinals, gaps, zero, overflow, inconsistent totals, and missing prefixes leave identity None."""
-        # Release with gap: [1/3] and [3/3] without [2/3]
-        xml_gap = """<?xml version="1.0" encoding="utf-8"?>
+    def test_separate_yenc_and_archive_passwords(self):
+        archive_xml = """<?xml version="1.0" encoding="utf-8"?>
 <nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
- <file poster="p@test.com" date="1600000000" subject="[1/3] - &quot;f1.bin&quot; yEnc (1/1)">
-  <segments><segment bytes="1000" number="1">m1@test</segment></segments>
- </file>
- <file poster="p@test.com" date="1600000000" subject="[3/3] - &quot;f3.bin&quot; yEnc (1/1)">
-  <segments><segment bytes="1000" number="1">m3@test</segment></segments>
+ <head><meta type="password">archive_pass</meta></head>
+ <file poster="p@test.com" date="1600000000" subject="&quot;archive.rar&quot; yEnc (1/1)">
+  <segments><segment bytes="1000" number="1">archive@test</segment></segments>
  </file>
 </nzb>"""
-        nzb_file = _write_nzb_gz(SAB_CACHE_DIR, "test_gap", xml_gap)
-        nzo = NzbObject("test_gap")
-        nzbparser.nzbfile_parser(nzb_file, nzo)
-        for f in nzo.files:
-            f.finish_import()
-            assert f.file_ordinal is None
-            assert f.total_files is None
-            assert f.segment_index_base is None
-            for art in f.decodetable:
-                assert art.segment_index is None
-                assert art.part_number == 1  # declared part preserved!
-
-        # Release with part gap: file has parts 1 and 3 (part 2 missing)
-        xml_part_gap = """<?xml version="1.0" encoding="utf-8"?>
+        encrypted_xml = """<?xml version="1.0" encoding="utf-8"?>
 <nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
- <file poster="p@test.com" date="1600000000" subject="[1/1] - &quot;f1.bin&quot; yEnc (1/3)">
-  <segments>
-   <segment bytes="1000" number="1">m1@test</segment>
-   <segment bytes="1000" number="3">m3@test</segment>
-  </segments>
+ <head><meta type="password">enc_pass</meta></head>
+ <file poster="p@test.com" date="1600000000" subject="opaque">
+  <segments><segment bytes="1000" number="1" segmentIndex="42">encrypted@test</segment></segments>
  </file>
 </nzb>"""
-        nzb_file = _write_nzb_gz(SAB_CACHE_DIR, "test_part_gap", xml_part_gap)
-        nzo = NzbObject("test_part_gap")
-        nzbparser.nzbfile_parser(nzb_file, nzo)
-        f = nzo.files[0]
-        f.finish_import()
-        assert f.file_ordinal is None
-        assert f.segment_index_base is None
-        assert len(f.decodetable) == 2
-        # Declared parts MUST be preserved (1 and 3, not compacted into 1 and 2)
-        assert f.decodetable[0].part_number == 1
-        assert f.decodetable[1].part_number == 3
-        assert f.decodetable[0].segment_index is None
-        assert f.decodetable[1].segment_index is None
-
-        # Ordinary NZB with no [N/M] prefix at all
-        xml_ordinary = """<?xml version="1.0" encoding="utf-8"?>
+        explicit_xml = """<?xml version="1.0" encoding="utf-8"?>
 <nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
- <file poster="p@test.com" date="1600000000" subject="&quot;plain.bin&quot; yEnc (1/1)">
-  <segments><segment bytes="1000" number="1">plain@test</segment></segments>
+ <head><meta type="yenc_encrypted">true</meta></head>
+ <file poster="p@test.com" date="1600000000" subject="opaque">
+  <segments><segment bytes="1000" number="1" segmentIndex="7">explicit@test</segment></segments>
  </file>
 </nzb>"""
-        nzb_file = _write_nzb_gz(SAB_CACHE_DIR, "test_plain", xml_ordinary)
-        nzo = NzbObject("test_plain")
-        nzbparser.nzbfile_parser(nzb_file, nzo)
-        f = nzo.files[0]
-        f.finish_import()
-        assert f.file_ordinal is None
-        assert f.total_files is None
-        assert f.segment_index_base is None
-        assert f.decodetable[0].part_number == 1
-        assert f.decodetable[0].segment_index is None
 
-        # Duplicate ordinals: two files with [1/2]
-        xml_dup = """<?xml version="1.0" encoding="utf-8"?>
-<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
- <file poster="p@test.com" date="1600000000" subject="[1/2] - &quot;f1.bin&quot; yEnc (1/1)">
-  <segments><segment bytes="1000" number="1">m1@test</segment></segments>
- </file>
- <file poster="p@test.com" date="1600000000" subject="[1/2] - &quot;f2.bin&quot; yEnc (1/1)">
-  <segments><segment bytes="1000" number="1">m2@test</segment></segments>
- </file>
-</nzb>"""
-        nzb_file = _write_nzb_gz(SAB_CACHE_DIR, "test_dup", xml_dup)
-        nzo = NzbObject("test_dup")
-        nzbparser.nzbfile_parser(nzb_file, nzo)
-        for f_item in nzo.files:
-            f_item.finish_import()
-            assert f_item.file_ordinal is None
-            assert f_item.segment_index_base is None
-            assert f_item.decodetable[0].segment_index is None
+        archive_nzo = NzbObject("archive")
+        nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, "archive", archive_xml), archive_nzo)
+        archive_nzo.files[0].finish_import()
+        assert archive_nzo.meta["password"] == ["archive_pass"]
+        assert archive_nzo.yenc_encrypted is False
+        assert archive_nzo.files[0].decodetable[0].segment_index is None
 
-        # Zero ordinal: [0/2]
-        xml_zero = """<?xml version="1.0" encoding="utf-8"?>
-<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
- <file poster="p@test.com" date="1600000000" subject="[0/2] - &quot;f0.bin&quot; yEnc (1/1)">
-  <segments><segment bytes="1000" number="1">m0@test</segment></segments>
- </file>
- <file poster="p@test.com" date="1600000000" subject="[1/2] - &quot;f1.bin&quot; yEnc (1/1)">
-  <segments><segment bytes="1000" number="1">m1@test</segment></segments>
- </file>
-</nzb>"""
-        nzb_file = _write_nzb_gz(SAB_CACHE_DIR, "test_zero", xml_zero)
-        nzo = NzbObject("test_zero")
-        nzbparser.nzbfile_parser(nzb_file, nzo)
-        for f_item in nzo.files:
-            f_item.finish_import()
-            assert f_item.file_ordinal is None
-            assert f_item.segment_index_base is None
-            assert f_item.decodetable[0].segment_index is None
+        encrypted_nzo = NzbObject("encrypted")
+        nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, "encrypted", encrypted_xml), encrypted_nzo)
+        encrypted_nzo.files[0].finish_import()
+        assert encrypted_nzo.meta["password"] == ["enc_pass"]
+        assert encrypted_nzo.yenc_encrypted is True
+        assert encrypted_nzo.files[0].decodetable[0].segment_index == 42
 
-        # Inconsistent totals: [1/2] and [2/3]
-        xml_inconsistent = """<?xml version="1.0" encoding="utf-8"?>
-<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
- <file poster="p@test.com" date="1600000000" subject="[1/2] - &quot;f1.bin&quot; yEnc (1/1)">
-  <segments><segment bytes="1000" number="1">m1@test</segment></segments>
- </file>
- <file poster="p@test.com" date="1600000000" subject="[2/3] - &quot;f2.bin&quot; yEnc (1/1)">
-  <segments><segment bytes="1000" number="1">m2@test</segment></segments>
- </file>
-</nzb>"""
-        nzb_file = _write_nzb_gz(SAB_CACHE_DIR, "test_inconsistent", xml_inconsistent)
-        nzo = NzbObject("test_inconsistent")
-        nzbparser.nzbfile_parser(nzb_file, nzo)
-        for f_item in nzo.files:
-            f_item.finish_import()
-            assert f_item.file_ordinal is None
-            assert f_item.segment_index_base is None
-            assert f_item.decodetable[0].segment_index is None
-
-        # Overflow ordinal: [4294967296/2]
-        xml_overflow = """<?xml version="1.0" encoding="utf-8"?>
-<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
- <file poster="p@test.com" date="1600000000" subject="[4294967296/2] - &quot;f1.bin&quot; yEnc (1/1)">
-  <segments><segment bytes="1000" number="1">m1@test</segment></segments>
- </file>
-</nzb>"""
-        nzb_file = _write_nzb_gz(SAB_CACHE_DIR, "test_overflow", xml_overflow)
-        nzo = NzbObject("test_overflow")
-        nzbparser.nzbfile_parser(nzb_file, nzo)
-        f = nzo.files[0]
-        f.finish_import()
-        assert f.file_ordinal is None
-        assert f.segment_index_base is None
-        assert f.decodetable[0].segment_index is None
-
-        # N > M: [3/2]
-        xml_gt = """<?xml version="1.0" encoding="utf-8"?>
-<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
- <file poster="p@test.com" date="1600000000" subject="[3/2] - &quot;f1.bin&quot; yEnc (1/1)">
-  <segments><segment bytes="1000" number="1">m1@test</segment></segments>
- </file>
- <file poster="p@test.com" date="1600000000" subject="[1/2] - &quot;f2.bin&quot; yEnc (1/1)">
-  <segments><segment bytes="1000" number="1">m2@test</segment></segments>
- </file>
-</nzb>"""
-        nzb_file = _write_nzb_gz(SAB_CACHE_DIR, "test_gt", xml_gt)
-        nzo = NzbObject("test_gt")
-        nzbparser.nzbfile_parser(nzb_file, nzo)
-        for f_item in nzo.files:
-            f_item.finish_import()
-            assert f_item.file_ordinal is None
-            assert f_item.segment_index_base is None
-            assert f_item.decodetable[0].segment_index is None
-
-    @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
-    def test_reconstruct_identity_repeated_parse_identical(self):
-        """Repeated parse yields the exact same complete assignment."""
-        xml = """<?xml version="1.0" encoding="utf-8"?>
-<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
- <file poster="p@test.com" date="1600000000" subject="[1/2] - &quot;file1.bin&quot; yEnc (1/2)">
-  <segments>
-   <segment bytes="1000" number="1">p1_1@test</segment>
-   <segment bytes="1000" number="2">p1_2@test</segment>
-  </segments>
- </file>
- <file poster="p@test.com" date="1600000000" subject="[2/2] - &quot;file2.bin&quot; yEnc (1/1)">
-  <segments>
-   <segment bytes="1000" number="1">p2_1@test</segment>
-  </segments>
- </file>
-</nzb>"""
-        nzb_file = _write_nzb_gz(SAB_CACHE_DIR, "test_repeat", xml)
-
-        nzo1 = NzbObject("test_repeat_1")
-        nzbparser.nzbfile_parser(nzb_file, nzo1)
-        for f in nzo1.files:
-            f.finish_import()
-
-        nzo2 = NzbObject("test_repeat_2")
-        nzbparser.nzbfile_parser(nzb_file, nzo2)
-        for f in nzo2.files:
-            f.finish_import()
-
-        f1_1 = {f.filename: f for f in nzo1.files}["file1.bin"]
-        f1_2 = {f.filename: f for f in nzo2.files}["file1.bin"]
-        assert f1_1.file_ordinal == f1_2.file_ordinal == 1
-        assert f1_1.segment_index_base == f1_2.segment_index_base == 1
-        assert [a.segment_index for a in f1_1.decodetable] == [a.segment_index for a in f1_2.decodetable] == [1, 2]
-
-        f2_1 = {f.filename: f for f in nzo1.files}["file2.bin"]
-        f2_2 = {f.filename: f for f in nzo2.files}["file2.bin"]
-        assert f2_1.file_ordinal == f2_2.file_ordinal == 2
-        assert f2_1.segment_index_base == f2_2.segment_index_base == 3
-        assert [a.segment_index for a in f2_1.decodetable] == [a.segment_index for a in f2_2.decodetable] == [3]
+        explicit_nzo = NzbObject("explicit")
+        nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, "explicit", explicit_xml), explicit_nzo)
+        assert explicit_nzo.yenc_encrypted is True
 
     @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
     def test_password_redacted_from_parser_logs(self, caplog):

@@ -189,6 +189,7 @@ NzbObjectSaver = (
     "next_save",
     "save_timeout",
     "encrypted",
+    "yenc_encrypted",
     "bad_articles",
     "duplicate",
     "duplicate_key",
@@ -348,6 +349,7 @@ class NzbObject(TryList):
         self.next_save = None
         self.save_timeout = None
         self.encrypted = 0
+        self.yenc_encrypted: bool = False
         self.url_wait: Optional[float] = None
         self.url_tries = 0
         self.pp_active = False
@@ -1778,6 +1780,8 @@ class NzbObject(TryList):
             except KeyError:
                 # Handle new attributes
                 setattr(self, item, None)
+        if self.yenc_encrypted is None:
+            self.yenc_encrypted = False
         self.lock = threading.RLock()
         super().__setstate__(dict_.get("try_list", []))
 

@@ -571,15 +571,15 @@ class Downloader(Thread):
 
         # Handle broken articles directly
         has_lines = bool(response and getattr(response, "lines", None))
-        has_password = bool(
-            getattr(getattr(getattr(article, "nzf", None), "nzo", None), "password", None)
-            or getattr(article, "password", None)
+        is_encrypted = (
+            getattr(getattr(getattr(article, "nzf", None), "nzo", None), "yenc_encrypted", False)
+            or getattr(article, "segment_index", None) is not None
         )
 
         if not response or (
             not response.bytes_decoded
             and not article.nzf.nzo.precheck
-            and not (has_lines and has_password)
+            and not (has_lines and is_encrypted)
         ):
             if not article.search_new_server():
                 article.nzf.nzo.increase_bad_articles_counter("missing_articles")

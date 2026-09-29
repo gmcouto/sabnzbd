@@ -236,7 +236,9 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
         raw_wire = b"\r\n".join(lines) + b"\r\n"
 
         adapter = DecryptionAdapter(password=password)
-        segment_index = getattr(article, "segment_index", None) or 1
+        segment_index = getattr(article, "segment_index", None)
+        if segment_index is None:
+            raise ValueError(f"Missing explicit segment_index for encrypted article {getattr(article, 'article', '')}")
 
         restored_block, salt_line1 = adapter.restore_control_lines(raw_wire, segment_index)
         yenc_params, clean_yenc = extract_and_remove_yencryption(restored_block)
@@ -301,8 +303,8 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
     yenc_info = getattr(response, "yencryption", None) or getattr(article, "yencryption", None)
     if not yenc_info and getattr(response, "lines", None):
         for line in response.lines:
-            if isinstance(line, (str, bytes)) and (
-                line.startswith("=yencryption") or line.startswith(b"=yencryption")
+            if (isinstance(line, str) and line.startswith("=yencryption")) or (
+                isinstance(line, bytes) and line.startswith(b"=yencryption")
             ):
                 yenc_info = line
                 break
@@ -326,7 +328,9 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
         from sabnzbd.encryption import DecryptionAdapter
 
         adapter = DecryptionAdapter(password=password)
-        segment_index = getattr(article, "segment_index", None) or 1
+        segment_index = getattr(article, "segment_index", None)
+        if segment_index is None:
+            raise ValueError(f"Missing explicit segment_index for encrypted article {getattr(article, 'article', '')}")
 
         plaintext = adapter.decrypt_body(
             ciphertext=bytes(decoded_data),

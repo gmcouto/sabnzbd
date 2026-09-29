@@ -381,50 +381,31 @@ def process_single_nzb(
 UINT32_MAX = 4294967295
 
 
-def parse_file_counter(subject: str) -> tuple[Optional[int], Optional[int], str]:
-    """Parse leading [N/M] - file counter from subject.
+def parse_segment_index(val_str: Optional[str]) -> int:
+    """Strictly parse a segmentIndex attribute string per Standard v1.0 Section 8.
 
-    Returns (file_ordinal, total_files, residual_subject).
-    If prefix is absent, malformed, non-ASCII, zero, or overflow, returns (None, None, subject).
+    Returns int in range 1..4294967295.
+    Raises ValueError with canonical error token on violation.
     """
-    if not subject.startswith("["):
-        return None, None, subject
-
-    bracket_close = subject.find("]")
-    if bracket_close == -1:
-        return None, None, subject
-
-    counter_str = subject[1:bracket_close]
-    after = subject[bracket_close + 1 :]
-
-    # Must be followed by " - "
-    if not after.startswith(" - "):
-        return None, None, subject
-    residual = after[3:]
-
-    # Counter must contain exactly one "/"
-    parts = counter_str.split("/")
-    if len(parts) != 2:
-        return None, None, subject
-
-    n_str, m_str = parts[0], parts[1]
-    if not (n_str.isascii() and n_str.isdigit() and m_str.isascii() and m_str.isdigit()):
-        return None, None, subject
-
-    try:
-        n = int(n_str)
-        m = int(m_str)
-    except ValueError:
-        return None, None, subject
-
-    # Must be one-based uint32
-    if n <= 0 or m <= 0 or n > UINT32_MAX or m > UINT32_MAX:
-        return None, None, subject
-
-    return n, m, residual
+    if val_str is None or val_str == "":
+        raise ValueError("INVALID_SEGMENT_INDEX_EMPTY")
+    if val_str == "0":
+        raise ValueError("INVALID_SEGMENT_INDEX_ZERO")
+    if val_str.startswith("+") or val_str.startswith("-"):
+        raise ValueError("INVALID_SEGMENT_INDEX_SIGN")
+    if val_str != val_str.strip() or any(c in " \t\n\r" for c in val_str):
+        raise ValueError("INVALID_SEGMENT_INDEX_WHITESPACE")
+    if len(val_str) > 1 and val_str.startswith("0") and val_str.isdigit():
+        raise ValueError("INVALID_SEGMENT_INDEX_LEADING_ZERO")
+    if not (val_str.isascii() and val_str.isdigit()):
+        raise ValueError("INVALID_SEGMENT_INDEX_NON_DIGIT")
+    val = int(val_str)
+    if val > UINT32_MAX:
+        raise ValueError("INVALID_SEGMENT_INDEX_OVERFLOW")
+    return val
 
 
-def nzbfile_parser(full_nzb_path: str, nzo):
+def nzbfile_parser(full_nzb_path: str, nzo, force_encrypted: bool = False):
     # For type-hinting
     nzo: NzbObject
 
@@ -516,7 +497,8 @@ def nzbfile_parser(full_nzb_path: str, nzo):
                                 logging.info("Skipping article %s due to strange size (%s)", article_id, segment_size)
                                 nzo.increase_bad_articles_counter("bad_articles")
                             else:
-                                raw_article_db[partnum] = (article_id, segment_size)
+                                raw_segment_index = segment.attrib.get("segmentIndex")
+                                raw_article_db[partnum] = (article_id, segment_size, raw_segment_index)
                                 file_bytes += segment_size
                         except Exception:
                             # In case of missing attributes
@@ -528,69 +510,65 @@ def nzbfile_parser(full_nzb_path: str, nzo):
                     element.clear()
                     continue
 
-                file_ord, total_files, residual = parse_file_counter(file_name)
                 sorted_articles = [
-                    (article_id, segment_size, partnum)
-                    for partnum, (article_id, segment_size) in sorted(raw_article_db.items())
+                    [article_id, segment_size, partnum, raw_segment_index]
+                    for partnum, (article_id, segment_size, raw_segment_index) in sorted(raw_article_db.items())
                 ]
                 parsed_files.append(
                     {
                         "date": file_date,
                         "timestamp": file_timestamp,
-                        "file_name": residual,
+                        "file_name": file_name,
                         "bytes": file_bytes,
-                        "file_ord": file_ord,
-                        "total_files": total_files,
                         "raw_articles": sorted_articles,
                     }
                 )
                 element.clear()
 
-        # Reconstruct segment identity across the release
-        total_parsed = len(parsed_files)
-        has_valid_identity = (
-            total_parsed > 0
-            and all(f["file_ord"] is not None and f["total_files"] is not None for f in parsed_files)
-            and all(f["total_files"] == total_parsed for f in parsed_files)
-            and {f["file_ord"] for f in parsed_files} == set(range(1, total_parsed + 1))
+        # Determine encryption mode and enforce release-wide relational integrity
+        explicit_yenc = any(v.lower() == "true" for v in nzo.meta.get("yenc_encrypted", []))
+        has_password = bool(nzo.meta.get("password") or getattr(nzo, "password", None))
+        any_has_index = any(art[3] is not None for f in parsed_files for art in f["raw_articles"])
+        is_encrypted = (
+            force_encrypted
+            or getattr(nzo, "force_encrypted", False)
+            or getattr(nzo, "yenc_encrypted", False)
+            or explicit_yenc
+            or (has_password and any_has_index)
         )
 
-        if has_valid_identity:
-            # Check declared parts per file: must be contiguous 1..len(raw_articles)
+        if is_encrypted:
+            if "yenc_encrypted" not in nzo.meta:
+                nzo.meta["yenc_encrypted"] = []
+            if "true" not in nzo.meta["yenc_encrypted"]:
+                nzo.meta["yenc_encrypted"].append("true")
+            nzo.yenc_encrypted = True
+            seen_indices = set()
+            seen_mids = {}
             for f in parsed_files:
-                parts = [art[2] for art in f["raw_articles"]]
-                if not parts or parts != list(range(1, len(parts) + 1)):
-                    has_valid_identity = False
-                    break
-
-        file_bases = {}
-        if has_valid_identity:
-            # Map files by ordinal to compute prefix sums
-            files_by_ord = {f["file_ord"]: f for f in parsed_files}
-            prefix_sum = 0
-            for ord_num in range(1, total_parsed + 1):
-                f_item = files_by_ord[ord_num]
-                part_count = len(f_item["raw_articles"])
-                base = prefix_sum + 1
-                if base + part_count - 1 > UINT32_MAX:
-                    has_valid_identity = False
-                    break
-                file_bases[ord_num] = base
-                prefix_sum += part_count
+                for art in f["raw_articles"]:
+                    raw_segment_index = art[3]
+                    if raw_segment_index is None:
+                        raise ValueError("MISSING_SEGMENT_INDEX")
+                    seg_idx = parse_segment_index(raw_segment_index)
+                    mid = art[0].strip("<>")
+                    if mid in seen_mids and seen_mids[mid] != seg_idx:
+                        raise ValueError("CONFLICTING_MESSAGE_ID_INDEX")
+                    if mid not in seen_mids:
+                        if seg_idx in seen_indices:
+                            raise ValueError("DUPLICATE_SEGMENT_INDEX")
+                        seen_indices.add(seg_idx)
+                        seen_mids[mid] = seg_idx
+                    art[3] = seg_idx
+        else:
+            for f in parsed_files:
+                for art in f["raw_articles"]:
+                    art[3] = None
 
         # Build final raw_article_db_sorted and create NzbFiles
         for f in parsed_files:
-            file_ord = f["file_ord"] if has_valid_identity else None
-            total_files = f["total_files"] if has_valid_identity else None
-            base = file_bases.get(f["file_ord"]) if has_valid_identity else None
-
             raw_article_db_sorted = [
-                (
-                    art[0],
-                    art[1],
-                    art[2],
-                    (base + art[2] - 1) if base is not None else None,
-                )
+                (art[0], art[1], art[2], art[3])
                 for art in f["raw_articles"]
             ]
 
@@ -601,9 +579,6 @@ def nzbfile_parser(full_nzb_path: str, nzo):
                     raw_article_db_sorted,
                     f["bytes"],
                     nzo,
-                    file_ordinal=file_ord,
-                    total_files=total_files,
-                    segment_index_base=base,
                 )
             except SkippedNzbFile:
                 # Did not meet requirements, so continue

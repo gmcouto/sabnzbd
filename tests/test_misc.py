@@ -1637,3 +1637,25 @@ class TestCgroupMemoryLimit:
         with self.patched_open({}):
             with mock.patch("sabnzbd.misc._physical_memory", return_value=None):
                 assert misc.get_memory() == 0
+
+
+def test_password_redaction(caplog):
+    from sabnzbd.nzb import NzbObject
+
+    canary_user_pw = "CANARY_SAB_SECRET_12345"
+    canary_meta_pw = "CANARY_META_PW_9999"
+
+    nzo = NzbObject("test_redaction")
+    nzo.password = canary_user_pw
+    nzo.meta = {"password": [canary_meta_pw]}
+
+    with caplog.at_level(logging.DEBUG):
+        pws = misc.get_all_passwords(nzo)
+
+    assert canary_user_pw in pws
+    assert canary_meta_pw in pws
+    assert canary_user_pw not in caplog.text
+    assert canary_meta_pw not in caplog.text
+    assert "Found a password that was set by the user: <redacted>" in caplog.text
+    assert "Read 1 password(s) from meta data in NZB" in caplog.text
+

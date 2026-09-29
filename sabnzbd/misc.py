@@ -687,7 +687,8 @@ def caller_name(skip: int = 2) -> str:
     if hasattr(sys, "frozen"):
         module_name = inspect.getfile(parentframe)
     else:
-        module_name = inspect.getmodule(parentframe).__name__
+        mod = inspect.getmodule(parentframe)
+        module_name = mod.__name__ if mod else inspect.getfile(parentframe)
 
     # For decorated functions we have to go deeper
     if function_name in ("call_func", "wrap") and skip == 2:
@@ -1172,7 +1173,7 @@ def get_all_passwords(nzo) -> list[str]:
         passwords.append(nzo.correct_password)
 
     if nzo.password:
-        logging.info("Found a password that was set by the user: %s", nzo.password)
+        logging.info("Found a password that was set by the user: <redacted>")
         passwords.append(nzo.password.strip())
 
     # Note that we get a reference to the list, so adding to it updates the original list!
@@ -1183,7 +1184,7 @@ def get_all_passwords(nzo) -> list[str]:
 
     if meta_passwords:
         passwords.extend(meta_passwords)
-        logging.info("Read %s passwords from meta data in NZB: %s", len(meta_passwords), meta_passwords)
+        logging.info("Read %s password(s) from meta data in NZB", len(meta_passwords))
 
     pw_file = cfg.password_file.get_path()
     if pw_file:
@@ -1192,7 +1193,7 @@ def get_all_passwords(nzo) -> list[str]:
                 lines = pwf.read().split("\n")
             # Remove empty lines and space-only passwords and remove surrounding spaces
             pws = [pw.strip("\r\n ") for pw in lines if pw.strip("\r\n ")]
-            logging.debug("Read these passwords from file: %s", pws)
+            logging.debug("Read %s password(s) from file", len(pws))
             passwords.extend(pws)
             logging.info("Read %s passwords from file %s", len(pws), pw_file)
 
