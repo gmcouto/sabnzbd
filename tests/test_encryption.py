@@ -45,9 +45,7 @@ from sabnzbd.newswrapper import NewsWrapper
 
 
 def _get_test_vector_dir() -> Path:
-    # Project root is 2 directories up from sabnzbd/tests
-    project_root = Path(__file__).resolve().parents[2]
-    vector_dir = project_root / "yenc-encryption-standards" / "test-vectors"
+    vector_dir = Path(__file__).resolve().parent / "data" / "test-vectors"
     if not vector_dir.exists():
         pytest.skip(f"Test vectors not found at {vector_dir}")
     return vector_dir

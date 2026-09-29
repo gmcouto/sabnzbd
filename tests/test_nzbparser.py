@@ -80,7 +80,7 @@ class TestNzbParser:
     def test_nzb_segment_identity_conformance(self):
         vectors_path = os.path.join(
             os.path.dirname(__file__),
-            "../../yenc-encryption-standards/test-vectors/nzb_segment_identity.json",
+            "data/test-vectors/nzb_segment_identity.json",
         )
         with open(vectors_path, encoding="utf-8") as vectors_file:
             vectors = json.load(vectors_file)["vectors"]

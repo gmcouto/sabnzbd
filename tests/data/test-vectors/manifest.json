@@ -1,0 +1,44 @@
+{
+  "schema_version": "1.0",
+  "standard_version": "1.0",
+  "generated_at": "2026-09-27T22:00:00Z",
+  "description": "Deterministic test vectors for yEnc Body & Control Lines Encryption Standards v1.0",
+  "files": {
+    "argon2id.json": {
+      "sha256": "66caee112050e9f1c46144ada63f5132258b102c8b356f1ac54428d0fa31bc3c",
+      "vector_count": 6,
+      "description": "RFC 9106 Argon2id key derivation test vectors (VEC-01)",
+      "requirement": "VEC-01"
+    },
+    "nonce_tweak.json": {
+      "sha256": "9d8b95864865f00ad35b6f2045b01e010a176e39ab7e3a3307dbaef146fa6584",
+      "vector_count": 15,
+      "description": "HMAC-SHA256 nonce and tweak derivation test vectors (VEC-02)",
+      "requirement": "VEC-02"
+    },
+    "body_encryption.json": {
+      "sha256": "03b5592a0c1802adc76797f9c08aa30af361c356eeffe6e22ec2cbb65e5db604",
+      "vector_count": 8,
+      "description": "RFC 8439 Extended XChaCha20-Poly1305 body encryption round-trip vectors (VEC-03)",
+      "requirement": "VEC-03"
+    },
+    "control_line_encryption.json": {
+      "sha256": "0729929a489ae687e9a9f91d9bb2ed14c3b61c0566dd771f5fd2839e52b7d87a",
+      "vector_count": 8,
+      "description": "NIST SP 800-38G FF1 control-line encryption round-trip vectors (VEC-04)",
+      "requirement": "VEC-04"
+    },
+    "malformed_inputs.json": {
+      "sha256": "2882409816c3dc6e6eec54e2f128146e2e9db606fbf8e5c09d8c77962ba90160",
+      "vector_count": 31,
+      "description": "Malformed syntax, invalid parameters, and auth failure rejection vectors (VEC-05)",
+      "requirement": "VEC-05"
+    },
+    "nzb_segment_identity.json": {
+      "sha256": "6ee81c24dce35f56f6bc6485c44917927fba90f9703fb14f5e3dadf1495d519d",
+      "vector_count": 33,
+      "description": "Canonical NZB explicit segmentIndex identity, validation, and tampering vectors (VEC-06)",
+      "requirement": "VEC-06"
+    }
+  }
+}
