@@ -30,6 +30,9 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 import nacl.bindings as nb
 
 
+BOOTSTRAP_PREFIX_LEN = 20
+
+
 def byte_to_numeral(b: int) -> int:
     """Map byte octet to numeral 0..252 per yEnc Control Lines Standard v1.0."""
     if 0x01 <= b <= 0x09:
@@ -190,10 +193,10 @@ def ff1_decrypt(key: bytes, tweak: bytes, ciphertext_bytes: bytes, radix: int = 
 
 
 def parse_yencryption_line(line: str | bytes) -> Optional[dict[str, Any]]:
-    """Parse standard =yencryption control line.
+    """Parse standard =yencryption control line per v1.1 Self-Describing Article Bootstrap Standard.
 
-    Format: =yencryption cipher=XChaCha20-Poly1305 salt=<32_hex_chars> tag=<32_hex_chars>
-    Enforces strict token count (4), exact token order, exact lowercase hex, and exact 32-character lengths.
+    Format: =yencryption cipher=XChaCha20-Poly1305 salt=<32_hex_chars> index=<8_hex_chars> tag=<32_hex_chars>
+    Enforces strict token count (5), exact token order, exact lowercase hex, and exact lengths.
     """
     if isinstance(line, bytes):
         line = line.decode("ascii", errors="replace")
@@ -202,27 +205,32 @@ def parse_yencryption_line(line: str | bytes) -> Optional[dict[str, Any]]:
         return None
 
     tokens = line.split()
-    if len(tokens) != 4:
+    if len(tokens) != 5:
         return None
     if tokens[0] != "=yencryption":
         return None
-    if not tokens[1].startswith("cipher="):
+    if tokens[1] != "cipher=XChaCha20-Poly1305":
         return None
     if not tokens[2].startswith("salt="):
         return None
-    if not tokens[3].startswith("tag="):
+    if not tokens[3].startswith("index="):
         return None
-
-    cipher = tokens[1][len("cipher=") :]
-    if cipher != "XChaCha20-Poly1305":
+    if not tokens[4].startswith("tag="):
         return None
 
     salt_hex = tokens[2][len("salt=") :]
-    tag_hex = tokens[3][len("tag=") :]
+    index_hex = tokens[3][len("index=") :]
+    tag_hex = tokens[4][len("tag=") :]
 
     if len(salt_hex) != 32 or not all(c in "0123456789abcdef" for c in salt_hex):
         return None
+    if len(index_hex) != 8 or not all(c in "0123456789abcdef" for c in index_hex):
+        return None
     if len(tag_hex) != 32 or not all(c in "0123456789abcdef" for c in tag_hex):
+        return None
+
+    segment_index = int(index_hex, 16)
+    if segment_index == 0:
         return None
 
     try:
@@ -232,8 +240,9 @@ def parse_yencryption_line(line: str | bytes) -> Optional[dict[str, Any]]:
         return None
 
     return {
-        "cipher": cipher,
+        "cipher": "XChaCha20-Poly1305",
         "salt": salt,
+        "segment_index": segment_index,
         "tag": tag,
     }
 
@@ -296,17 +305,29 @@ def extract_and_remove_yencryption(yenc_block: bytes) -> tuple[dict[str, Any], b
     return params, b"".join(clean_lines)
 
 
-def extract_salt_from_line1(line1: bytes) -> bytes:
-    """Extract and validate 16-byte salt from control line 1 per yEnc Control Lines Standard v1.0.
+def extract_bootstrap_from_line1(line1: bytes) -> tuple[bytes, int]:
+    """Extract and validate 20-byte bootstrap prefix ([16B salt][4B uint32_be(segmentIndex)]) from Line 1.
 
-    Ensures line is at least 18 bytes and contains no forbidden bytes (0x00, 0x0A, 0x0D).
+    Ensures line is at least 22 bytes, salt contains no forbidden bytes, and segment_index > 0.
     """
-    if len(line1) < 18:
-        raise ValueError(f"Line 1 truncated: {len(line1)} bytes (minimum 18)")
+    if len(line1) < 22:
+        raise ValueError(f"Line 1 truncated: {len(line1)} bytes (minimum 22)")
     salt = line1[:16]
     for b in salt:
         if b in (0x00, 0x0A, 0x0D):
             raise ValueError(f"Forbidden byte 0x{b:02x} in salt (0x00, 0x0A, 0x0D forbidden)")
+    segment_index = int.from_bytes(line1[16:20], "big")
+    if segment_index == 0:
+        raise ValueError("ZERO_SEGMENT_INDEX: segment index cannot be zero")
+    return salt, segment_index
+
+
+def extract_salt_from_line1(line1: bytes) -> bytes:
+    """Extract and validate 16-byte salt from control line 1 (backward-compatible helper).
+
+    Delegates to extract_bootstrap_from_line1 and returns only the salt.
+    """
+    salt, _ = extract_bootstrap_from_line1(line1)
     return salt
 
 
@@ -388,14 +409,16 @@ class DecryptionAdapter:
         """Decrypt a single control line with FF1 over Radix 253."""
         return ff1_decrypt(enc_key, tweak, ciphertext, radix)
 
-    def restore_control_lines(self, yenc_block: bytes, segment_index: int) -> tuple[bytes, bytes]:
-        """Restore encrypted control lines in a yEnc article block per Standard v1.0 Section 5.
+    def restore_control_lines(
+        self, yenc_block: bytes, segment_index: Optional[int] = None
+    ) -> tuple[bytes, bytes, int]:
+        """Restore encrypted control lines in a yEnc article block per Standard v1.1.
 
-        Returns (restored_yenc_block, salt).
+        Returns (restored_yenc_block, salt, segment_index).
         """
         raw_lines = yenc_block.splitlines(keepends=True)
         if not raw_lines:
-            return yenc_block, b""
+            return yenc_block, b"", 0
 
         # Extract line ending from line 1
         line1_raw = raw_lines[0]
@@ -409,12 +432,16 @@ class DecryptionAdapter:
             ending = b""
             line1_content = line1_raw
 
-        # Line 1: first 16 bytes is salt
-        salt = extract_salt_from_line1(line1_content)
+        # Line 1: first 20 bytes is bootstrap prefix ([16B salt][4B uint32_be(segmentIndex)])
+        salt, line1_segment_index = extract_bootstrap_from_line1(line1_content)
+        if segment_index is not None and segment_index != line1_segment_index:
+            raise ValueError(
+                f"Dual index mismatch: caller specified {segment_index} but line 1 bootstrap contains {line1_segment_index}"
+            )
 
-        ct1 = line1_content[16:]
+        ct1 = line1_content[BOOTSTRAP_PREFIX_LEN:]
         master_key = self.get_master_key(salt)
-        enc_key, tweak1 = self.derive_control_keys(master_key, segment_index, 1)
+        enc_key, tweak1 = self.derive_control_keys(master_key, line1_segment_index, 1)
         pt1 = self.decrypt_control_line(ct1, enc_key, tweak1)
         if not pt1.startswith(b"=ybegin"):
             raise ValueError("Control line decrypt failure: line 1 does not start with =ybegin")
@@ -437,7 +464,7 @@ class DecryptionAdapter:
 
             line_index = idx + 1
             if in_header:
-                enc_key, tweak = self.derive_control_keys(master_key, segment_index, line_index)
+                enc_key, tweak = self.derive_control_keys(master_key, line1_segment_index, line_index)
                 try:
                     pt = self.decrypt_control_line(content, enc_key, tweak)
                     if pt.startswith(b"=y"):
@@ -465,10 +492,10 @@ class DecryptionAdapter:
                 footer_content = raw_footer
 
             footer_line_index = n_total
-            enc_key, tweak = self.derive_control_keys(master_key, segment_index, footer_line_index)
+            enc_key, tweak = self.derive_control_keys(master_key, line1_segment_index, footer_line_index)
             pt_footer = self.decrypt_control_line(footer_content, enc_key, tweak)
             if not pt_footer.startswith(b"=yend"):
                 raise ValueError("Control line decrypt failure: footer does not start with =yend")
             restored_lines.append(pt_footer + footer_ending)
 
-        return b"".join(restored_lines), salt
+        return b"".join(restored_lines), salt, line1_segment_index
