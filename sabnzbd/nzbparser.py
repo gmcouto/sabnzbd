@@ -543,23 +543,28 @@ def nzbfile_parser(full_nzb_path: str, nzo, force_encrypted: bool = False):
             if "true" not in nzo.meta["yenc_encrypted"]:
                 nzo.meta["yenc_encrypted"].append("true")
             nzo.yenc_encrypted = True
-            seen_indices = set()
-            seen_mids = {}
-            for f in parsed_files:
-                for art in f["raw_articles"]:
-                    raw_segment_index = art[3]
-                    if raw_segment_index is None:
-                        raise ValueError("MISSING_SEGMENT_INDEX")
-                    seg_idx = parse_segment_index(raw_segment_index)
-                    mid = art[0].strip("<>")
-                    if mid in seen_mids and seen_mids[mid] != seg_idx:
-                        raise ValueError("CONFLICTING_MESSAGE_ID_INDEX")
-                    if mid not in seen_mids:
-                        if seg_idx in seen_indices:
-                            raise ValueError("DUPLICATE_SEGMENT_INDEX")
-                        seen_indices.add(seg_idx)
-                        seen_mids[mid] = seg_idx
-                    art[3] = seg_idx
+            if any_has_index:
+                seen_indices = set()
+                seen_mids = {}
+                for f in parsed_files:
+                    for art in f["raw_articles"]:
+                        raw_segment_index = art[3]
+                        if raw_segment_index is None:
+                            raise ValueError("MISSING_SEGMENT_INDEX")
+                        seg_idx = parse_segment_index(raw_segment_index)
+                        mid = art[0].strip("<>")
+                        if mid in seen_mids and seen_mids[mid] != seg_idx:
+                            raise ValueError("CONFLICTING_MESSAGE_ID_INDEX")
+                        if mid not in seen_mids:
+                            if seg_idx in seen_indices:
+                                raise ValueError("DUPLICATE_SEGMENT_INDEX")
+                            seen_indices.add(seg_idx)
+                            seen_mids[mid] = seg_idx
+                        art[3] = seg_idx
+            else:
+                for f in parsed_files:
+                    for art in f["raw_articles"]:
+                        art[3] = None
         else:
             for f in parsed_files:
                 for art in f["raw_articles"]:

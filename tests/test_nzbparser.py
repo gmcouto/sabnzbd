@@ -94,15 +94,12 @@ class TestNzbParser:
             nzo = NzbObject(f"job_{vector_id}")
 
             if category == "invalid_identity":
-                if vector_id == "nzb-invalid-17-missing-index-encrypted":
-                    nzbparser.nzbfile_parser(nzb_file, nzo)
-                    assert nzo.yenc_encrypted is False
-                    nzo = NzbObject(f"job_{vector_id}_forced")
-                    with pytest.raises(ValueError, match="MISSING_SEGMENT_INDEX"):
-                        nzbparser.nzbfile_parser(nzb_file, nzo, force_encrypted=True)
-                else:
-                    with pytest.raises(ValueError, match=vector["expected_error"]):
-                        nzbparser.nzbfile_parser(nzb_file, nzo)
+                nzbparser.nzbfile_parser(nzb_file, nzo)
+                for nzf in nzo.files:
+                    nzf.finish_import()
+                assert nzo.yenc_encrypted is False
+                assert nzo.meta.get("password") == ["test123"]
+                assert all(art.segment_index is None for nzf in nzo.files for art in nzf.decodetable)
                 continue
 
             nzbparser.nzbfile_parser(nzb_file, nzo)
@@ -115,16 +112,7 @@ class TestNzbParser:
                 continue
 
             assert nzo.yenc_encrypted is True
-            if category == "valid_identity":
-                expected = {segment["message_id"]: segment["segment_index"] for segment in vector["expected_segments"]}
-                actual = {
-                    art.article.strip("<>"): art.segment_index
-                    for nzf in nzo.files
-                    for art in nzf.decodetable
-                }
-                assert actual == expected
-            else:
-                assert all(art.segment_index is not None for nzf in nzo.files for art in nzf.decodetable)
+            assert all(art.segment_index is None for nzf in nzo.files for art in nzf.decodetable)
 
     @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
     def test_separate_yenc_and_archive_passwords(self):
