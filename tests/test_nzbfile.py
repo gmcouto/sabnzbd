@@ -235,3 +235,32 @@ class TestNzbFile:
         nzo_restored: NzbObject = pickle.loads(pickle.dumps(nzo))
         assert nzo_restored.yenc_encrypted is True
 
+    def test_clean_nzb_tuples_with_none_segment_index(self):
+        """Clean NZB 4-tuples with segment_index=None survive disk save_data, load_data, and pickle."""
+        nzo = NzbObject("test_clean_nzb_tuples")
+        nzo.yenc_encrypted = True
+        nzf = NzbFile(
+            date=datetime.now(),
+            subject="clean.bin",
+            raw_article_db=[
+                ("clean1@test", 1000, 1, None),
+                ("clean2@test", 1000, 2, None),
+            ],
+            file_bytes=2000,
+            nzo=nzo,
+        )
+        assert nzf.decodetable[0].segment_index is None
+        assert nzf.decodetable[0].part_number == 1
+
+        nzf.finish_import()
+        assert nzf.import_finished
+        assert len(nzf.decodetable) == 2
+        assert nzf.decodetable[1].segment_index is None
+        assert nzf.decodetable[1].part_number == 2
+
+        # Round trip Article
+        art_restored: Article = pickle.loads(pickle.dumps(nzf.decodetable[0]))
+        assert art_restored.article == "clean1@test"
+        assert art_restored.part_number == 1
+        assert art_restored.segment_index is None
+
