@@ -1041,5 +1041,237 @@ class TestDirectWriteGatingAndFailover:
             srv1.stop()
             srv2.stop()
 
+    def test_key_cache_bounded_capacity(self):
+        """FINDING-31-01 / GAP-31-07: DecryptionAdapter._key_cache must be bounded to MAX_CACHED_KEYS."""
+        from sabnzbd.encryption import DecryptionAdapter, MAX_CACHED_KEYS
+
+        adapter = DecryptionAdapter(password="secret")
+        assert MAX_CACHED_KEYS == 32
+
+        with mock.patch.object(adapter, "_derive_argon2id", side_effect=lambda secret, salt, **kw: b"K" * 32):
+            salts = [bytes([i % 256]) * 16 for i in range(40)]
+            for s in salts:
+                adapter.get_master_key(s)
+
+            assert len(adapter._key_cache) == MAX_CACHED_KEYS
+            for s in salts[:8]:
+                assert s not in adapter._key_cache
+            for s in salts[8:]:
+                assert s in adapter._key_cache
+
+    def test_article_can_direct_write_encrypted_defense(self):
+        """FINDING-31-02 / GAP-31-06: Article.can_direct_write must evaluate to False for encrypted articles."""
+        mock_nzo = mock.MagicMock()
+        mock_nzo.yenc_encrypted = False
+        mock_nzf = mock.MagicMock()
+        mock_nzf.nzo = mock_nzo
+        mock_nzf.type = "yenc"
+        mock_nzf.prepare_filepath.return_value = True
+
+        art = Article("art@1", 100, mock_nzf)
+        art.data_size = 1000
+
+        # Unencrypted article can direct write
+        assert art.can_direct_write is True
+
+        # Gated by article.segment_index
+        art.segment_index = 1
+        assert art.can_direct_write is False
+
+        # Gated by nzo.yenc_encrypted even if segment_index is None
+        art.segment_index = None
+        mock_nzo.yenc_encrypted = True
+        assert art.can_direct_write is False
+
+    def test_boundary_uint32_segment_indices(self):
+        """GAP-31-01: Boundary uint32 segmentIndex values (4294967295, 4294967294) in derivation and AEAD."""
+        import nacl.bindings as nb
+
+        adapter = DecryptionAdapter(password="boundary_test_pwd")
+        salt = bytes.fromhex("0102030405060708090a0b0c0d0e0f10")
+        master_key = adapter.get_master_key(salt)
+        plaintext = b"Payload at uint32 boundary"
+
+        for seg_idx in (4294967294, 4294967295):
+            nonce = adapter.derive_body_nonce(master_key, seg_idx)
+            assert len(nonce) == 24
+            enc = nb.crypto_aead_xchacha20poly1305_ietf_encrypt(plaintext, None, nonce, master_key)
+            ct = enc[:-16]
+            tag = enc[-16:]
+
+            decrypted = adapter.decrypt_body(ct, tag, salt, seg_idx)
+            assert decrypted == plaintext
+
+            # Also check control key derivation at boundary
+            enc_key, tweak = adapter.derive_control_keys(master_key, seg_idx, 4294967295)
+            assert len(enc_key) == 32
+            assert len(tweak) == 8
+
+        # Test overflow 2^32 fails closed
+        with pytest.raises(ValueError, match="out of range for uint32_be"):
+            adapter.derive_body_nonce(master_key, 4294967296)
+
+        with pytest.raises(ValueError, match="out of range for uint32_be"):
+            adapter.derive_control_keys(master_key, 4294967296, 1)
+
+        with pytest.raises(ValueError, match="out of range for uint32_be"):
+            adapter.derive_control_keys(master_key, 1, 4294967296)
+
+    def test_mixed_line_endings_control_restoration(self):
+        """GAP-31-02: Mixed line endings (CRLF and bare LF) in control lines during restore_control_lines."""
+        adapter = DecryptionAdapter(password="mixed_endings_pwd")
+        salt = bytes.fromhex("11223344556677889911aabbccddeeff")
+        master_key = adapter.get_master_key(salt)
+        seg_idx = 10
+
+        pt_line1 = b"=ybegin line=128 size=20 name=test.bin"
+        pt_line2 = b"=yencryption cipher=XChaCha20-Poly1305 salt=" + salt.hex().encode("ascii") + b" tag=" + (b"00" * 16)
+        pt_line3 = b"=yend size=20 crc32=12345678"
+
+        k1, tw1 = adapter.derive_control_keys(master_key, seg_idx, 1)
+        k3, tw3 = adapter.derive_control_keys(master_key, seg_idx, 3)
+
+        ct_line1 = adapter.encrypt_control_line(pt_line1, k1, tw1)
+        ct_line3 = adapter.encrypt_control_line(pt_line3, k3, tw3)
+
+        wire = (
+            salt + ct_line1 + b"\r\n"
+            + pt_line2 + b"\n"
+            + ct_line3 + b"\r\n"
+        )
+
+        restored_wire, extracted_salt = adapter.restore_control_lines(wire, segment_index=seg_idx)
+        assert extracted_salt == salt
+
+        lines = restored_wire.splitlines(keepends=True)
+        assert len(lines) == 3
+        assert lines[0] == pt_line1 + b"\r\n"
+        assert lines[1] == pt_line2 + b"\n"
+        assert lines[2] == pt_line3 + b"\r\n"
+
+    def test_zero_length_encrypted_payload(self):
+        """GAP-31-03: Zero-length encrypted article payload (0-byte plaintext encryption and decryption)."""
+        import nacl.bindings as nb
+        import sabctools
+        import sabnzbd.decoder as decoder
+
+        password = "zero_len_password"
+        salt = bytes.fromhex("aabbccddeeff00112233445566778899")
+        segment_index = 5
+        empty_pt = b""
+
+        adapter = DecryptionAdapter(password=password)
+        master_key = adapter.get_master_key(salt)
+        nonce = adapter.derive_body_nonce(master_key, segment_index)
+
+        enc = nb.crypto_aead_xchacha20poly1305_ietf_encrypt(empty_pt, None, nonce, master_key)
+        ct = enc[:-16]
+        tag = enc[-16:]
+        assert len(ct) == 0
+        assert len(tag) == 16
+
+        decrypted = adapter.decrypt_body(ct, tag, salt, segment_index)
+        assert decrypted == b""
+
+        article = mock.MagicMock(spec=Article)
+        article.article = "zero@news"
+        article.nzf.nzo.password = password
+        article.nzf.filename_checked = True
+        article.lowest_partnum = False
+        article.segment_index = segment_index
+
+        resp = mock.MagicMock(spec=sabctools.NNTPResponse)
+        resp.sink_failed = False
+        resp.data = bytearray(ct)
+        resp.file_size = 0
+        resp.part_begin = 0
+        resp.part_size = 0
+        resp.bytes_decoded = 0
+        resp.file_name = "empty.bin"
+        resp.crc = 0
+        resp.lines = None
+        resp.yencryption = {
+            "cipher": "XChaCha20-Poly1305",
+            "salt": salt,
+            "tag": tag,
+        }
+
+        res = decoder.decode_yenc(article, resp)
+        assert res == bytearray()
+        assert article.decoded_size == 0
+
+    def test_reordered_segment_arrival_assembly(self):
+        """GAP-31-04: Reordered segment arrival in multi-article assembly."""
+        import nacl.bindings as nb
+        import sabctools
+        import sabnzbd.decoder as decoder
+
+        password = "reorder_test_password"
+        salt = bytes.fromhex("11112222333344445555666677778888")
+        adapter = DecryptionAdapter(password=password)
+        master_key = adapter.get_master_key(salt)
+
+        part1_pt = b"AAAA_PART_1_AAAA"
+        part2_pt = b"BBBB_PART_2_BBBB"
+
+        # Segment 1
+        nonce1 = adapter.derive_body_nonce(master_key, 1)
+        enc1 = nb.crypto_aead_xchacha20poly1305_ietf_encrypt(part1_pt, None, nonce1, master_key)
+        resp1 = mock.MagicMock(spec=sabctools.NNTPResponse)
+        resp1.sink_failed = False
+        resp1.data = bytearray(enc1[:-16])
+        resp1.file_size = len(part1_pt) + len(part2_pt)
+        resp1.part_begin = 0
+        resp1.part_size = len(part1_pt)
+        resp1.bytes_decoded = len(enc1[:-16])
+        resp1.file_name = "multi.bin"
+        resp1.crc = 0x11111111
+        resp1.lines = None
+        resp1.yencryption = {"cipher": "XChaCha20-Poly1305", "salt": salt, "tag": enc1[-16:]}
+
+        # Segment 2
+        nonce2 = adapter.derive_body_nonce(master_key, 2)
+        enc2 = nb.crypto_aead_xchacha20poly1305_ietf_encrypt(part2_pt, None, nonce2, master_key)
+        resp2 = mock.MagicMock(spec=sabctools.NNTPResponse)
+        resp2.sink_failed = False
+        resp2.data = bytearray(enc2[:-16])
+        resp2.file_size = len(part1_pt) + len(part2_pt)
+        resp2.part_begin = len(part1_pt)
+        resp2.part_size = len(part2_pt)
+        resp2.bytes_decoded = len(enc2[:-16])
+        resp2.file_name = "multi.bin"
+        resp2.crc = 0x22222222
+        resp2.lines = None
+        resp2.yencryption = {"cipher": "XChaCha20-Poly1305", "salt": salt, "tag": enc2[-16:]}
+
+        mock_nzo = mock.MagicMock()
+        mock_nzo.password = password
+        mock_nzf = mock.MagicMock()
+        mock_nzf.nzo = mock_nzo
+        mock_nzf.filename_checked = True
+
+        art1 = Article("art1@multi", len(part1_pt), mock_nzf)
+        art1.segment_index = 1
+        art1.lowest_partnum = False
+
+        art2 = Article("art2@multi", len(part2_pt), mock_nzf)
+        art2.segment_index = 2
+        art2.lowest_partnum = False
+
+        # Arrive OUT OF ORDER: Part 2 decoded before Part 1
+        decoded2 = decoder.decode_yenc(art2, resp2)
+        assert decoded2 == bytearray(part2_pt)
+
+        decoded1 = decoder.decode_yenc(art1, resp1)
+        assert decoded1 == bytearray(part1_pt)
+
+        # Assembled buffer in canonical offset order matches original concatenation
+        assembled = bytearray(len(part1_pt) + len(part2_pt))
+        assembled[resp2.part_begin:resp2.part_begin + len(part2_pt)] = decoded2
+        assembled[resp1.part_begin:resp1.part_begin + len(part1_pt)] = decoded1
+        assert assembled == bytearray(part1_pt + part2_pt)
+
+
+
 
 

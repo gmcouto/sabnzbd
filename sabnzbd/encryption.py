@@ -310,8 +310,13 @@ def extract_salt_from_line1(line1: bytes) -> bytes:
     return salt
 
 
+MAX_CACHED_KEYS: int = 32
+
+
 class DecryptionAdapter:
     """SABnzbd decryption adapter encapsulating Argon2id, PyNaCl, and FF1."""
+
+    MAX_CACHED_KEYS: int = MAX_CACHED_KEYS
 
     def __init__(self, password: Optional[str] = None):
         self.password: Optional[str] = password
@@ -345,6 +350,9 @@ class DecryptionAdapter:
             type=ll.Type.ID,
             version=0x13,
         )
+        if len(self._key_cache) >= self.MAX_CACHED_KEYS:
+            oldest_salt = next(iter(self._key_cache))
+            del self._key_cache[oldest_salt]
         self._key_cache[salt] = key
         return key
 

@@ -197,3 +197,60 @@ class TestNzbParser:
         assert nzo.meta.get("password") == [secret_sentinel]
         assert nzo.meta.get("category") == ["movies"]
 
+    @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
+    def test_malformed_xml_segment_attributes(self):
+        """GAP-31-05: Missing or invalid bytes/number attributes in encrypted NZB are safely handled."""
+        # 1. Segment missing 'bytes' attribute is skipped; remaining valid segment is kept
+        missing_bytes_xml = """<?xml version="1.0" encoding="utf-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
+ <head><meta type="password">pass</meta></head>
+ <file poster="p@test.com" date="1600000000" subject="test">
+  <segments>
+   <segment number="1" segmentIndex="10">valid@test</segment>
+   <segment bytes="1000" number="2" segmentIndex="20">seg2@test</segment>
+  </segments>
+ </file>
+</nzb>"""
+        nzo1 = NzbObject("missing_bytes")
+        nzb_file1 = _write_nzb_gz(SAB_CACHE_DIR, "missing_bytes", missing_bytes_xml)
+        nzbparser.nzbfile_parser(nzb_file1, nzo1)
+        nzo1.files[0].finish_import()
+        assert len(nzo1.files[0].decodetable) == 1
+        assert nzo1.files[0].decodetable[0].article == "seg2@test"
+        assert nzo1.files[0].decodetable[0].segment_index == 20
+
+        # 2. Segment with non-integer 'bytes' attribute
+        invalid_bytes_xml = """<?xml version="1.0" encoding="utf-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
+ <head><meta type="password">pass</meta></head>
+ <file poster="p@test.com" date="1600000000" subject="test">
+  <segments>
+   <segment bytes="not_a_number" number="1" segmentIndex="10">bad@test</segment>
+   <segment bytes="500" number="2" segmentIndex="20">good@test</segment>
+  </segments>
+ </file>
+</nzb>"""
+        nzo2 = NzbObject("invalid_bytes")
+        nzb_file2 = _write_nzb_gz(SAB_CACHE_DIR, "invalid_bytes", invalid_bytes_xml)
+        nzbparser.nzbfile_parser(nzb_file2, nzo2)
+        nzo2.files[0].finish_import()
+        assert len(nzo2.files[0].decodetable) == 1
+        assert nzo2.files[0].decodetable[0].article == "good@test"
+        assert nzo2.files[0].decodetable[0].segment_index == 20
+
+        # 3. Segment missing 'number' attribute
+        missing_number_xml = """<?xml version="1.0" encoding="utf-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
+ <head><meta type="password">pass</meta></head>
+ <file poster="p@test.com" date="1600000000" subject="test">
+  <segments>
+   <segment bytes="1000" segmentIndex="10">missing_num@test</segment>
+  </segments>
+ </file>
+</nzb>"""
+        nzo3 = NzbObject("missing_number")
+        nzb_file3 = _write_nzb_gz(SAB_CACHE_DIR, "missing_number", missing_number_xml)
+        nzbparser.nzbfile_parser(nzb_file3, nzo3)
+        assert len(nzo3.files) == 0
+
+

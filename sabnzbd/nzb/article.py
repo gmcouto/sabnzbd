@@ -208,6 +208,8 @@ class Article(TryList):
 
     @property
     def can_direct_write(self) -> bool:
+        if getattr(getattr(self.nzf, "nzo", None), "yenc_encrypted", False) or self.segment_index is not None:
+            return False
         return bool(
             self.data_size  # decoder sets data_size to 0 when offsets or file_size are outside allowed range
             and self.nzf.type == "yenc"
