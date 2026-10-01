@@ -236,16 +236,17 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
         raw_wire = b"\r\n".join(lines) + b"\r\n"
 
         adapter = DecryptionAdapter(password=password)
-        segment_index = getattr(article, "segment_index", None)
-        if segment_index is None:
-            raise ValueError(f"Missing explicit segment_index for encrypted article {getattr(article, 'article', '')}")
-
-        restored_block, salt_line1 = adapter.restore_control_lines(raw_wire, segment_index)
+        restored_block, salt_line1, seg_idx_line1 = adapter.restore_control_lines(raw_wire)
         yenc_params, clean_yenc = extract_and_remove_yencryption(restored_block)
 
         if yenc_params["salt"] != salt_line1:
             raise ValueError(
                 f"Salt mismatch between control line 1 ({salt_line1.hex()}) and =yencryption ({yenc_params['salt'].hex()})"
+            )
+
+        if yenc_params["segment_index"] != seg_idx_line1:
+            raise ValueError(
+                f"Dual index mismatch between control line 1 ({seg_idx_line1}) and =yencryption ({yenc_params['segment_index']})"
             )
 
         art_id = getattr(article, "article", "enc")
@@ -271,10 +272,12 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
             ciphertext=bytes(sub_resp.data),
             tag=yenc_params["tag"],
             salt=yenc_params["salt"],
-            segment_index=segment_index,
+            segment_index=seg_idx_line1,
         )
 
         decoded_data = bytearray(plaintext)
+        if getattr(article, "segment_index", None) is None:
+            article.segment_index = seg_idx_line1
         article.file_size = sub_resp.file_size
         article.data_begin = sub_resp.part_begin
         article.data_size = sub_resp.part_size
@@ -330,6 +333,8 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
         adapter = DecryptionAdapter(password=password)
         segment_index = getattr(article, "segment_index", None)
         if segment_index is None:
+            segment_index = parsed_enc.get("segment_index")
+        if segment_index is None:
             raise ValueError(f"Missing explicit segment_index for encrypted article {getattr(article, 'article', '')}")
 
         plaintext = adapter.decrypt_body(
@@ -338,6 +343,8 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
             salt=parsed_enc["salt"],
             segment_index=segment_index,
         )
+        if getattr(article, "segment_index", None) is None:
+            article.segment_index = segment_index
         decoded_data = bytearray(plaintext)
         article.decoded_size = len(decoded_data)
 

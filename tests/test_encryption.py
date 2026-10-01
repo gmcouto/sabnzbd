@@ -35,6 +35,8 @@ from sabnzbd.encryption import (
     parse_yencryption_line,
     extract_and_remove_yencryption,
     extract_salt_from_line1,
+    extract_bootstrap_from_line1,
+    BOOTSTRAP_PREFIX_LEN,
     ff1_encrypt,
     ff1_decrypt,
     byte_to_numeral,
@@ -207,8 +209,9 @@ class TestDecryptionAdapterContracts:
                 wire_block = b"\r\n".join(wire_lines) + b"\r\n"
 
                 adapter = DecryptionAdapter(password=password)
-                restored_block, extracted_salt = adapter.restore_control_lines(wire_block, segment_index)
+                restored_block, extracted_salt, extracted_idx = adapter.restore_control_lines(wire_block, segment_index)
                 assert extracted_salt == bytes.fromhex(vec["salt_hex"])
+                assert extracted_idx == segment_index
                 expected_block = b"\r\n".join(expected_lines) + b"\r\n"
                 assert restored_block == expected_block, f"Full article restoration mismatch for {vec['id']}"
             else:
@@ -227,8 +230,10 @@ class TestDecryptionAdapterContracts:
 
                 if is_line_1:
                     line_salt = wire_bytes[:16]
+                    line_idx = int.from_bytes(wire_bytes[16:20], "big")
                     assert line_salt == salt
-                    ct = wire_bytes[16:]
+                    assert line_idx == segment_index
+                    ct = wire_bytes[20:]
                 else:
                     ct = wire_bytes
 
@@ -275,22 +280,98 @@ class TestDecryptionAdapterContracts:
             byte_to_numeral(0x00)
 
         # 2. Parser
-        line = "=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 tag=0cd77ce245a654463f90b945b1d22d5b"
+        line = "=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=0cd77ce245a654463f90b945b1d22d5b"
         parsed = parse_yencryption_line(line)
         assert parsed is not None
         assert parsed["cipher"] == "XChaCha20-Poly1305"
         assert parsed["salt"] == bytes.fromhex("1a2b3c4d5e6f7890abcdef1234567890")
+        assert parsed["segment_index"] == 1
         assert parsed["tag"] == bytes.fromhex("0cd77ce245a654463f90b945b1d22d5b")
 
         # 3. extract_and_remove_yencryption basic smoke test
-        block = b"=ybegin line=128 size=10 name=test\r\n=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 tag=0cd77ce245a654463f90b945b1d22d5b\r\ndata\r\n=yend size=10\r\n"
+        block = b"=ybegin line=128 size=10 name=test\r\n=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=0cd77ce245a654463f90b945b1d22d5b\r\ndata\r\n=yend size=10\r\n"
         p, clean = extract_and_remove_yencryption(block)
         assert p["cipher"] == "XChaCha20-Poly1305"
+        assert p["segment_index"] == 1
         assert clean == b"=ybegin line=128 size=10 name=test\r\ndata\r\n=yend size=10\r\n"
 
         # Invalid lines
         assert parse_yencryption_line("not an encryption line") is None
         assert parse_yencryption_line("=yencryption cipher=AES salt=123 tag=456") is None
+
+    def test_extract_bootstrap_from_line1(self):
+        """Test 20-byte bootstrap extraction: 22B minimum length, forbidden bytes, and zero index."""
+        assert BOOTSTRAP_PREFIX_LEN == 20
+        valid_prefix = b"A" * 16 + (42).to_bytes(4, "big")
+        valid_line = valid_prefix + b"xy"
+        salt, idx = extract_bootstrap_from_line1(valid_line)
+        assert salt == b"A" * 16
+        assert idx == 42
+
+        # < 22 bytes fails
+        with pytest.raises(ValueError, match="Line 1 truncated"):
+            extract_bootstrap_from_line1(valid_prefix + b"x")
+
+        # Forbidden bytes in salt
+        for forbidden in (0x00, 0x0A, 0x0D):
+            bad_salt = bytearray(b"A" * 16)
+            bad_salt[5] = forbidden
+            with pytest.raises(ValueError, match="Forbidden byte"):
+                extract_bootstrap_from_line1(bytes(bad_salt) + (1).to_bytes(4, "big") + b"xx")
+
+        # Zero index fails
+        with pytest.raises(ValueError, match="ZERO_SEGMENT_INDEX"):
+            extract_bootstrap_from_line1(b"A" * 16 + (0).to_bytes(4, "big") + b"xx")
+
+    def test_dual_bootstrap_agreement(self):
+        """Test Dual-Bootstrap Agreement in decoder: salt mismatch and index mismatch."""
+        import sabctools
+        import sabnzbd.decoder as decoder
+
+        # Setup valid wire block
+        password = "test_password"
+        salt = bytes.fromhex("1a2b3c4d5e6f7890abcdef1234567890")
+        seg_idx = 1
+        adapter = DecryptionAdapter(password=password)
+        master_key = adapter.get_master_key(salt)
+        k1, t1 = adapter.derive_control_keys(master_key, seg_idx, 1)
+        k2, t2 = adapter.derive_control_keys(master_key, seg_idx, 2)
+
+        line1_pt = b"=ybegin line=128 size=100 name=test.bin"
+        wire1 = salt + seg_idx.to_bytes(4, "big") + ff1_encrypt(k1, t1, line1_pt)
+
+        k4, t4 = adapter.derive_control_keys(master_key, seg_idx, 4)
+        wire4 = ff1_encrypt(k4, t4, b"=yend size=100")
+
+        # 1. Salt mismatch
+        different_salt = bytes.fromhex("ffffffffffffffffffffffffffffffff")
+        line2_salt_mismatch = f"=yencryption cipher=XChaCha20-Poly1305 salt={different_salt.hex()} index={seg_idx:08x} tag={'0'*32}".encode("ascii")
+        wire2_bad_salt = ff1_encrypt(k2, t2, line2_salt_mismatch)
+
+        article = mock.MagicMock(spec=Article)
+        article.article = "art@test"
+        article.nzf.nzo.password = password
+        article.nzf.nzo.yenc_encrypted = True
+
+        resp_bad_salt = mock.MagicMock(spec=sabctools.NNTPResponse)
+        resp_bad_salt.sink_failed = False
+        resp_bad_salt.bytes_decoded = 0
+        resp_bad_salt.lines = [wire1.decode("latin-1"), wire2_bad_salt.decode("latin-1"), "data", wire4.decode("latin-1")]
+
+        with pytest.raises(ValueError, match="Salt mismatch"):
+            decoder.decode_yenc(article, resp_bad_salt)
+
+        # 2. Index mismatch
+        line2_idx_mismatch = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} index=00000002 tag={'0'*32}".encode("ascii")
+        wire2_bad_idx = ff1_encrypt(k2, t2, line2_idx_mismatch)
+
+        resp_bad_idx = mock.MagicMock(spec=sabctools.NNTPResponse)
+        resp_bad_idx.sink_failed = False
+        resp_bad_idx.bytes_decoded = 0
+        resp_bad_idx.lines = [wire1.decode("latin-1"), wire2_bad_idx.decode("latin-1"), "data", wire4.decode("latin-1")]
+
+        with pytest.raises(ValueError, match="Dual index mismatch"):
+            decoder.decode_yenc(article, resp_bad_idx)
 
 
 class TestDirectWriteGatingAndFailover:
@@ -400,7 +481,7 @@ class TestDirectWriteGatingAndFailover:
             assert art_broken.nzf.nzo.increase_bad_articles_counter.called
 
     def test_missing_segment_index_fails_closed(self):
-        """Encrypted articles without explicit segment identity release no output."""
+        """Encrypted articles without segment identity in header or article release no output."""
         import sabctools
         import sabnzbd.decoder as decoder
 
@@ -416,8 +497,14 @@ class TestDirectWriteGatingAndFailover:
         response = mock.MagicMock(spec=sabctools.NNTPResponse)
         response.sink_failed = False
         response.format = sabctools.EncodingFormat.YENC
-        response.bytes_decoded = 0
-        response.lines = ["encrypted_line"]
+        response.bytes_decoded = 20
+        response.data = bytearray(b"ciphertext")
+        response.lines = None
+        response.yencryption = {
+            "cipher": "XChaCha20-Poly1305",
+            "salt": b"\x01" * 16,
+            "tag": b"\x02" * 16,
+        }
 
         with pytest.raises(ValueError, match="Missing explicit segment_index"):
             decoder.decode_yenc(article, response)
@@ -569,12 +656,12 @@ class TestDirectWriteGatingAndFailover:
         body_encoded, body_crc = sabctools.yenc_encode(ct)
 
         line1_pt = f"=ybegin line=128 size={len(ct)} name=test.bin".encode("ascii")
-        line2_pt = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} tag={tag.hex()}".encode("ascii")
+        line2_pt = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} index={segment_index:08x} tag={tag.hex()}".encode("ascii")
         line3_pt = body_encoded
         line4_pt = f"=yend size={len(ct)} crc32={body_crc:08x}".encode("ascii")
 
         k1, t1 = adapter.derive_control_keys(master_key, segment_index, 1)
-        wire1 = salt + ff1_encrypt(k1, t1, line1_pt)
+        wire1 = salt + (segment_index).to_bytes(4, "big") + ff1_encrypt(k1, t1, line1_pt)
 
         k2, t2 = adapter.derive_control_keys(master_key, segment_index, 2)
         wire2 = ff1_encrypt(k2, t2, line2_pt)
@@ -611,11 +698,11 @@ class TestDirectWriteGatingAndFailover:
         # 2. Multipart article test
         line1_m_pt = f"=ybegin part=1 total=2 line=128 size={len(ct) * 2} name=multi.bin".encode("ascii")
         line2_m_pt = f"=ypart begin=1 end={len(ct)}".encode("ascii")
-        line3_m_pt = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} tag={tag.hex()}".encode("ascii")
+        line3_m_pt = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} index={segment_index:08x} tag={tag.hex()}".encode("ascii")
         line4_m_pt = body_encoded
         line5_m_pt = f"=yend size={len(ct)} part=1 pcrc32={body_crc:08x}".encode("ascii")
 
-        wire_m_1 = salt + ff1_encrypt(k1, t1, line1_m_pt)
+        wire_m_1 = salt + (segment_index).to_bytes(4, "big") + ff1_encrypt(k1, t1, line1_m_pt)
         wire_m_2 = ff1_encrypt(k2, t2, line2_m_pt)
         k3, t3 = adapter.derive_control_keys(master_key, segment_index, 3)
         wire_m_3 = ff1_encrypt(k3, t3, line3_m_pt)
@@ -669,7 +756,7 @@ class TestDirectWriteGatingAndFailover:
 
         # 4. Poly1305 authentication failure (tampered tag)
         bad_tag = bytes([tag[0] ^ 0xFF]) + tag[1:]
-        bad_line3_pt = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} tag={bad_tag.hex()}".encode("ascii")
+        bad_line3_pt = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} index={segment_index:08x} tag={bad_tag.hex()}".encode("ascii")
         bad_wire_3 = ff1_encrypt(k3, t3, bad_line3_pt)
 
         resp_bad_tag = mock.MagicMock(spec=sabctools.NNTPResponse)
@@ -687,7 +774,7 @@ class TestDirectWriteGatingAndFailover:
 
     def test_extract_and_remove_yencryption(self):
         """Verify strict header placement, extraction, duplicate/misplaced rejection, and stripping."""
-        valid_hdr = b"=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 tag=0cd77ce245a654463f90b945b1d22d5b"
+        valid_hdr = b"=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=0cd77ce245a654463f90b945b1d22d5b"
 
         # 1. Valid single-part article (header at line 2)
         single = (
@@ -700,6 +787,7 @@ class TestDirectWriteGatingAndFailover:
         params, clean = extract_and_remove_yencryption(single)
         assert params["cipher"] == "XChaCha20-Poly1305"
         assert params["salt"] == bytes.fromhex("1a2b3c4d5e6f7890abcdef1234567890")
+        assert params["segment_index"] == 1
         assert params["tag"] == bytes.fromhex("0cd77ce245a654463f90b945b1d22d5b")
         assert clean == (
             b"=ybegin line=128 size=100 name=test.bin\r\n"
@@ -718,6 +806,7 @@ class TestDirectWriteGatingAndFailover:
         )
         m_params, m_clean = extract_and_remove_yencryption(multi)
         assert m_params["cipher"] == "XChaCha20-Poly1305"
+        assert m_params["segment_index"] == 1
         assert m_clean == (
             b"=ybegin part=1 total=2 line=128 size=200 name=test.bin\r\n"
             b"=ypart begin=1 end=100\r\n"
@@ -826,7 +915,11 @@ class TestDirectWriteGatingAndFailover:
                     wire = bytes.fromhex(vec["line1_hex"]) + b"\r\n"
                     with pytest.raises(ValueError, match="Line 1 truncated"):
                         adapter.restore_control_lines(wire, segment_index=1)
-                elif vec_id == "control-syntax-06-wrong-password":
+                elif vec_id == "control-syntax-06-zero-segment-index":
+                    wire = bytes.fromhex(vec["line1_hex"]) + b"\r\n"
+                    with pytest.raises(ValueError, match="ZERO_SEGMENT_INDEX"):
+                        adapter.restore_control_lines(wire, segment_index=1)
+                elif vec_id in ("control-syntax-06-wrong-password", "control-syntax-07-wrong-password"):
                     # Valid wire line 1 from control_line_encryption.json
                     wire_line1 = bytes.fromhex(control_data["vectors"][0]["expected_wire_hex"]) + b"\r\n"
                     wrong_adapter = DecryptionAdapter(password=vec["wrong_password"])
@@ -880,12 +973,12 @@ class TestDirectWriteGatingAndFailover:
         body_encoded, body_crc = sabctools.yenc_encode(ct)
 
         line1_pt = f"=ybegin line=128 size={len(ct)} name=test.bin".encode("ascii")
-        line2_pt = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} tag={tag.hex()}".encode("ascii")
+        line2_pt = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} index={segment_index:08x} tag={tag.hex()}".encode("ascii")
         line3_pt = body_encoded
         line4_pt = f"=yend size={len(ct)} crc32={body_crc:08x}".encode("ascii")
 
         k1, t1 = adapter.derive_control_keys(master_key, segment_index, 1)
-        wire1 = salt + ff1_encrypt(k1, t1, line1_pt)
+        wire1 = salt + (segment_index).to_bytes(4, "big") + ff1_encrypt(k1, t1, line1_pt)
         k2, t2 = adapter.derive_control_keys(master_key, segment_index, 2)
         wire2 = ff1_encrypt(k2, t2, line2_pt)
         wire3 = line3_pt
@@ -895,7 +988,7 @@ class TestDirectWriteGatingAndFailover:
         valid_body = wire1 + b"\r\n" + wire2 + b"\r\n" + wire3 + b"\r\n" + wire4 + b"\r\n"
 
         bad_tag = bytes([tag[0] ^ 0xFF]) + tag[1:]
-        line2_bad_pt = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} tag={bad_tag.hex()}".encode("ascii")
+        line2_bad_pt = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} index={segment_index:08x} tag={bad_tag.hex()}".encode("ascii")
         wire2_bad = ff1_encrypt(k2, t2, line2_bad_pt)
         bad_body = wire1 + b"\r\n" + wire2_bad + b"\r\n" + wire3 + b"\r\n" + wire4 + b"\r\n"
 
