@@ -60,8 +60,8 @@ Article Bootstrap Standard.
 - **Clean Standard NZB 1.1 Support**: Encrypted NZBs conform strictly to standard NZB 1.1 XML containing
   only `<meta type="yenc_encrypted">true</meta>` and `<meta type="password">` in `<head>`, without
   custom segment attributes.
-- **Automatic Decryption**: Releases containing embedded password metadata decrypt automatically
-  without manual interaction.
+- **Automatic Decryption**: Encrypted releases containing `<meta type="yenc_encrypted">true</meta>` and
+  embedded password metadata decrypt automatically without manual interaction.
 - **Manual Password Entry**: For encrypted releases without embedded passwords, passwords can be
   supplied through the Web UI (Queue item edit / Password field) or via API (`addfile` / `addurl`
   with `password` parameter).
