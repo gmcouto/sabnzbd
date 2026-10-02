@@ -50,11 +50,25 @@ Our many other command line options are explained in depth [here](https://sabnzb
 
 ## yEnc Header and Body Decryption
 
-SABnzbd supports downloading releases protected by yEnc body and control-line encryption (XChaCha20-Poly1305 and Radix 253 FF1).
+SABnzbd supports downloading releases protected by yEnc body and control-line encryption
+(XChaCha20-Poly1305 and Radix 253 FF1) conforming to the experimental v1.1 Self-Describing
+Article Bootstrap Standard.
 
-- **Automatic Decryption**: Encrypted NZBs containing `<meta type="yenc_encrypted">true</meta>` and `<meta type="password">` decrypt automatically without manual interaction.
-- **Manual Password Entry**: For encrypted releases without embedded passwords, passwords can be provided through the Web UI (Queue item edit / Password field) or via API (`addfile` / `addurl` with `password` parameter).
-- **Security & Integrity**: Direct-write streaming is gated for encrypted releases to prevent unauthenticated ciphertext from reaching disk, and authentication failures trigger Usenet multi-server failover before failing the article.
+- **Self-Describing Article Wire Bootstrap**: Downloader extracts the 16-byte raw salt and uint32_be
+  `segmentIndex` from the 20-byte Line 1 prefix (`[16B salt][4B uint32_be(segmentIndex)]`) and verifies
+  dual-bootstrap cross-header agreement against the canonical 5-token `=yencryption` header line.
+- **Clean Standard NZB 1.1 Support**: Encrypted NZBs conform strictly to standard NZB 1.1 XML containing
+  only `<meta type="yenc_encrypted">true</meta>` and `<meta type="password">` in `<head>`, without
+  custom segment attributes.
+- **Automatic Decryption**: Releases containing embedded password metadata decrypt automatically
+  without manual interaction.
+- **Manual Password Entry**: For encrypted releases without embedded passwords, passwords can be
+  supplied through the Web UI (Queue item edit / Password field) or via API (`addfile` / `addurl`
+  with `password` parameter).
+- **Security & Integrity**: Direct-write streaming is gated for encrypted releases to prevent
+  unauthenticated ciphertext from reaching disk. Poly1305 authentication failure or wire header
+  mismatches trigger Usenet multi-server failover before failing the article. Zero unauthenticated
+  plaintext is released.
 
 ## About Our Repo
 
