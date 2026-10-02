@@ -331,6 +331,31 @@ def extract_salt_from_line1(line1: bytes) -> bytes:
     return salt
 
 
+def split_lines_preserving_endings(input_bytes: bytes) -> list[bytes]:
+    """Split bytes into lines preserving endings, skipping Line 1 bootstrap prefix.
+
+    For encrypted wire articles (which do not begin with =y), Line 1 carries a
+    20-byte bootstrap prefix ([16B salt][4B uint32_be(segmentIndex)]). Because
+    uint32_be(segmentIndex) may contain 0x0A (LF) or 0x0D (CR), the Line 1 terminator
+    is searched strictly after the 20-byte bootstrap prefix.
+    """
+    lines: list[bytes] = []
+    pos = 0
+    total = len(input_bytes)
+    while pos < total:
+        start = pos
+        if not lines and not input_bytes.startswith(b"=y") and total >= BOOTSTRAP_PREFIX_LEN:
+            pos += BOOTSTRAP_PREFIX_LEN
+        idx = input_bytes.find(b"\n", pos)
+        if idx != -1:
+            pos = idx + 1
+            lines.append(input_bytes[start:pos])
+        else:
+            lines.append(input_bytes[start:])
+            break
+    return lines
+
+
 class DecryptionAdapter:
     """SABnzbd decryption adapter encapsulating Argon2id, PyNaCl, and FF1."""
 
@@ -416,7 +441,7 @@ class DecryptionAdapter:
 
         Returns (restored_yenc_block, salt, segment_index).
         """
-        raw_lines = yenc_block.splitlines(keepends=True)
+        raw_lines = split_lines_preserving_endings(yenc_block)
         if not raw_lines:
             return yenc_block, b"", 0
 
