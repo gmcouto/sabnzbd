@@ -1658,3 +1658,46 @@ def test_password_redaction(caplog):
     assert canary_meta_pw not in caplog.text
     assert "Found a password that was set by the user: <redacted>" in caplog.text
     assert "Read 1 password(s) from meta data in NZB" in caplog.text
+
+
+def test_c3_01_save_load_attribs_password_redaction(caplog):
+    """C3-01: save_attribs and load_attribs sanitize passwords in debug logs."""
+    from unittest import mock
+    from sabnzbd.nzb import NzbObject
+
+    secret_pw = "CANARY_SAB_RETRY_SECRET_98765"
+    nzo = NzbObject("test_retry_secret")
+    nzo.password = secret_pw
+
+    with (
+        mock.patch("sabnzbd.nzb.object.save_data") as mock_save,
+        mock.patch(
+            "sabnzbd.nzb.object.load_data",
+            return_value={
+                "password": secret_pw,
+                "final_name": "test_retry_secret",
+                "yenc_encrypted": True,
+                "cat": "movies",
+                "pp": 1,
+                "script": None,
+            },
+        ),
+    ):
+        with caplog.at_level(logging.DEBUG):
+            nzo.save_attribs()
+            assert secret_pw not in caplog.text
+            assert "<redacted>" in caplog.text
+            assert mock_save.called
+            saved_dict = mock_save.call_args[0][0]
+            assert saved_dict["password"] == secret_pw
+
+        caplog.clear()
+
+        # Create new object to simulate reload on retry
+        nzo2 = NzbObject("test_retry_secret")
+        with caplog.at_level(logging.DEBUG):
+            nzo2.load_attribs()
+            assert secret_pw not in caplog.text
+            assert "<redacted>" in caplog.text
+
+        assert nzo2.password == secret_pw

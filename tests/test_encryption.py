@@ -1495,3 +1495,60 @@ class TestCycle1AdversarialRemediation:
 
         with pytest.raises(ValueError, match="Dual index mismatch"):
             decoder.decode_yenc(mock_article, mock_response)
+
+    def test_c3_02_wire_crc_error_raises_valueerror_for_encrypted_article(self):
+        """C3-02: decode_yenc raises ValueError on CRC error for encrypted article without saving BadData."""
+        import sabctools
+        import sabnzbd.decoder as decoder
+
+        article = mock.MagicMock(spec=Article)
+        article.article = "wire_crc@enc"
+        article.nzf.nzo.yenc_encrypted = True
+        article.nzf.type = "yenc"
+        article.nzf.filename_checked = True
+        article.lowest_partnum = False
+        article.segment_index = 1
+
+        response = mock.MagicMock(spec=sabctools.NNTPResponse)
+        response.sink_failed = False
+        response.bytes_decoded = 100
+        response.data = bytearray(b"corrupted_bytes")
+        response.file_size = 1000
+        response.part_begin = 0
+        response.part_size = 100
+        response.crc = None
+        response.yencryption = None
+        response.lines = None
+
+        with pytest.raises(ValueError, match="Wire CRC error in encrypted article"):
+            decoder.decode_yenc(article, response)
+
+    def test_c3_03_baddata_discard_on_standalone_article(self):
+        """C3-03: BadData on standalone article with article.yenc_encrypted discards data."""
+        import sabctools
+        import sabnzbd.decoder as decoder
+        from sabnzbd.decoder import BadData
+
+        article = mock.MagicMock(spec=Article)
+        article.article = "detached@enc"
+        article.nzf.nzo.yenc_encrypted = False
+        article.nzf.nzo.password = None
+        article.nzf.nzo.precheck = False
+        article.yenc_encrypted = True
+        article.segment_index = None
+        article.search_new_server.return_value = False
+        article.on_disk = False
+
+        response = mock.MagicMock(spec=sabctools.NNTPResponse)
+        mock_cache = mock.MagicMock()
+        mock_queue = mock.MagicMock()
+
+        with (
+            mock.patch("sabnzbd.decoder.decode_yenc", side_effect=BadData(bytearray(b"detached_ciphertext"))),
+            mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
+            mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
+        ):
+            decoder.decode(article, response)
+            assert not mock_cache.save_article.called
+            assert not article.on_disk
+            mock_queue.register_article.assert_called_with(article, False)

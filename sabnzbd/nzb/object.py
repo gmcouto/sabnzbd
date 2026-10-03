@@ -1598,13 +1598,19 @@ class NzbObject(TryList):
         attribs = {}
         for attrib in NzoAttributeSaver:
             attribs[attrib] = getattr(self, attrib)
-        logging.debug("Saving attributes %s for %s", attribs, self.final_name)
+        safe_attribs = {k: ("<redacted>" if k == "password" and v else v) for k, v in attribs.items()}
+        logging.debug("Saving attributes %s for %s", safe_attribs, self.final_name)
         save_data(attribs, ATTRIB_FILE, self.admin_path, silent=True)
 
     def load_attribs(self) -> tuple[Optional[str], Optional[int], Optional[str]]:
         """Load saved attributes and return them to be parsed"""
         attribs = load_data(ATTRIB_FILE, self.admin_path, remove=False)
-        logging.debug("Loaded attributes %s for %s", attribs, self.final_name)
+        safe_attribs = (
+            {k: ("<redacted>" if k == "password" and v else v) for k, v in attribs.items()}
+            if isinstance(attribs, dict)
+            else attribs
+        )
+        logging.debug("Loaded attributes %s for %s", safe_attribs, self.final_name)
 
         # If attributes file somehow does not exist
         if not attribs:

@@ -126,7 +126,9 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
         is_encrypted = (
             getattr(getattr(getattr(article, "nzf", None), "nzo", None), "yenc_encrypted", False)
             or getattr(article, "segment_index", None) is not None
+            or getattr(article, "yenc_encrypted", False)
             or bool(getattr(getattr(getattr(article, "nzf", None), "nzo", None), "password", None))
+            or bool(getattr(article, "password", None))
         )
         if is_encrypted:
             logging.info("Discarding corrupt encrypted article data for %s (zero-output guarantee)", art_id)
@@ -399,7 +401,13 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
     # CRC check
     if (crc := response.crc) is None:
         logging.info("CRC Error in %s", article.article)
-        if parsed_enc:
+        is_enc = (
+            bool(parsed_enc)
+            or getattr(getattr(getattr(article, "nzf", None), "nzo", None), "yenc_encrypted", False)
+            or getattr(article, "segment_index", None) is not None
+            or getattr(article, "yenc_encrypted", False)
+        )
+        if is_enc:
             raise ValueError(f"Wire CRC error in encrypted article {article.article}")
         # A streamed article is already on disk, so there is nothing to hand back; the
         # bytes stay put either way, so par2 has the same chance of repairing it
