@@ -1658,4 +1658,3 @@ def test_password_redaction(caplog):
     assert canary_meta_pw not in caplog.text
     assert "Found a password that was set by the user: <redacted>" in caplog.text
     assert "Read 1 password(s) from meta data in NZB" in caplog.text
-

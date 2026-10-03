@@ -345,7 +345,9 @@ class TestDecryptionAdapterContracts:
 
         # 1. Salt mismatch
         different_salt = bytes.fromhex("ffffffffffffffffffffffffffffffff")
-        line2_salt_mismatch = f"=yencryption cipher=XChaCha20-Poly1305 salt={different_salt.hex()} index={seg_idx:08x} tag={'0'*32}".encode("ascii")
+        line2_salt_mismatch = f"=yencryption cipher=XChaCha20-Poly1305 salt={different_salt.hex()} index={seg_idx:08x} tag={'0'*32}".encode(
+            "ascii"
+        )
         wire2_bad_salt = ff1_encrypt(k2, t2, line2_salt_mismatch)
 
         article = mock.MagicMock(spec=Article)
@@ -356,13 +358,20 @@ class TestDecryptionAdapterContracts:
         resp_bad_salt = mock.MagicMock(spec=sabctools.NNTPResponse)
         resp_bad_salt.sink_failed = False
         resp_bad_salt.bytes_decoded = 0
-        resp_bad_salt.lines = [wire1.decode("latin-1"), wire2_bad_salt.decode("latin-1"), "data", wire4.decode("latin-1")]
+        resp_bad_salt.lines = [
+            wire1.decode("latin-1"),
+            wire2_bad_salt.decode("latin-1"),
+            "data",
+            wire4.decode("latin-1"),
+        ]
 
         with pytest.raises(ValueError, match="Salt mismatch"):
             decoder.decode_yenc(article, resp_bad_salt)
 
         # 2. Index mismatch
-        line2_idx_mismatch = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} index=00000002 tag={'0'*32}".encode("ascii")
+        line2_idx_mismatch = (
+            f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} index=00000002 tag={'0'*32}".encode("ascii")
+        )
         wire2_bad_idx = ff1_encrypt(k2, t2, line2_idx_mismatch)
 
         resp_bad_idx = mock.MagicMock(spec=sabctools.NNTPResponse)
@@ -656,7 +665,9 @@ class TestDirectWriteGatingAndFailover:
         body_encoded, body_crc = sabctools.yenc_encode(ct)
 
         line1_pt = f"=ybegin line=128 size={len(ct)} name=test.bin".encode("ascii")
-        line2_pt = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} index={segment_index:08x} tag={tag.hex()}".encode("ascii")
+        line2_pt = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} index={segment_index:08x} tag={tag.hex()}".encode(
+            "ascii"
+        )
         line3_pt = body_encoded
         line4_pt = f"=yend size={len(ct)} crc32={body_crc:08x}".encode("ascii")
 
@@ -698,7 +709,9 @@ class TestDirectWriteGatingAndFailover:
         # 2. Multipart article test
         line1_m_pt = f"=ybegin part=1 total=2 line=128 size={len(ct) * 2} name=multi.bin".encode("ascii")
         line2_m_pt = f"=ypart begin=1 end={len(ct)}".encode("ascii")
-        line3_m_pt = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} index={segment_index:08x} tag={tag.hex()}".encode("ascii")
+        line3_m_pt = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} index={segment_index:08x} tag={tag.hex()}".encode(
+            "ascii"
+        )
         line4_m_pt = body_encoded
         line5_m_pt = f"=yend size={len(ct)} part=1 pcrc32={body_crc:08x}".encode("ascii")
 
@@ -756,7 +769,9 @@ class TestDirectWriteGatingAndFailover:
 
         # 4. Poly1305 authentication failure (tampered tag)
         bad_tag = bytes([tag[0] ^ 0xFF]) + tag[1:]
-        bad_line3_pt = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} index={segment_index:08x} tag={bad_tag.hex()}".encode("ascii")
+        bad_line3_pt = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} index={segment_index:08x} tag={bad_tag.hex()}".encode(
+            "ascii"
+        )
         bad_wire_3 = ff1_encrypt(k3, t3, bad_line3_pt)
 
         resp_bad_tag = mock.MagicMock(spec=sabctools.NNTPResponse)
@@ -778,29 +793,19 @@ class TestDirectWriteGatingAndFailover:
 
         # 1. Valid single-part article (header at line 2)
         single = (
-            b"=ybegin line=128 size=100 name=test.bin\r\n"
-            + valid_hdr
-            + b"\r\n"
-            b"DataLine1\r\n"
-            b"=yend size=100\r\n"
+            b"=ybegin line=128 size=100 name=test.bin\r\n" + valid_hdr + b"\r\n" b"DataLine1\r\n" b"=yend size=100\r\n"
         )
         params, clean = extract_and_remove_yencryption(single)
         assert params["cipher"] == "XChaCha20-Poly1305"
         assert params["salt"] == bytes.fromhex("1a2b3c4d5e6f7890abcdef1234567890")
         assert params["segment_index"] == 1
         assert params["tag"] == bytes.fromhex("0cd77ce245a654463f90b945b1d22d5b")
-        assert clean == (
-            b"=ybegin line=128 size=100 name=test.bin\r\n"
-            b"DataLine1\r\n"
-            b"=yend size=100\r\n"
-        )
+        assert clean == (b"=ybegin line=128 size=100 name=test.bin\r\n" b"DataLine1\r\n" b"=yend size=100\r\n")
 
         # 2. Valid multipart article (header at line 3, following =ypart)
         multi = (
             b"=ybegin part=1 total=2 line=128 size=200 name=test.bin\r\n"
-            b"=ypart begin=1 end=100\r\n"
-            + valid_hdr
-            + b"\r\n"
+            b"=ypart begin=1 end=100\r\n" + valid_hdr + b"\r\n"
             b"DataLine1\r\n"
             b"=yend size=100 part=1\r\n"
         )
@@ -815,22 +820,14 @@ class TestDirectWriteGatingAndFailover:
         )
 
         # 3. Missing =yencryption line
-        missing = (
-            b"=ybegin line=128 size=100 name=test.bin\r\n"
-            b"DataLine1\r\n"
-            b"=yend size=100\r\n"
-        )
+        missing = b"=ybegin line=128 size=100 name=test.bin\r\n" b"DataLine1\r\n" b"=yend size=100\r\n"
         with pytest.raises(ValueError, match="does not start with =yencryption"):
             extract_and_remove_yencryption(missing)
 
         # 4. Duplicate =yencryption line
         dup = (
-            b"=ybegin line=128 size=100 name=test.bin\r\n"
-            + valid_hdr
-            + b"\r\n"
-            b"DataLine1\r\n"
-            + valid_hdr
-            + b"\r\n"
+            b"=ybegin line=128 size=100 name=test.bin\r\n" + valid_hdr + b"\r\n"
+            b"DataLine1\r\n" + valid_hdr + b"\r\n"
             b"=yend size=100\r\n"
         )
         with pytest.raises(ValueError, match="Duplicate or misplaced =yencryption"):
@@ -838,20 +835,14 @@ class TestDirectWriteGatingAndFailover:
 
         # 5. Misplaced =yencryption (at line 3 in single-part)
         misplaced_single = (
-            b"=ybegin line=128 size=100 name=test.bin\r\n"
-            b"DataLine1\r\n"
-            + valid_hdr
-            + b"\r\n"
-            b"=yend size=100\r\n"
+            b"=ybegin line=128 size=100 name=test.bin\r\n" b"DataLine1\r\n" + valid_hdr + b"\r\n" b"=yend size=100\r\n"
         )
         with pytest.raises(ValueError, match="does not start with =yencryption"):
             extract_and_remove_yencryption(misplaced_single)
 
         # 6. Misplaced =yencryption (at line 2 instead of line 3 in multipart)
         misplaced_multi = (
-            b"=ybegin part=1 total=2 line=128 size=200 name=test.bin\r\n"
-            + valid_hdr
-            + b"\r\n"
+            b"=ybegin part=1 total=2 line=128 size=200 name=test.bin\r\n" + valid_hdr + b"\r\n"
             b"=ypart begin=1 end=100\r\n"
             b"DataLine1\r\n"
             b"=yend size=100 part=1\r\n"
@@ -860,12 +851,7 @@ class TestDirectWriteGatingAndFailover:
             extract_and_remove_yencryption(misplaced_multi)
 
         # 7. Line 1 not =ybegin
-        not_begin = (
-            b"not_ybegin\r\n"
-            + valid_hdr
-            + b"\r\n"
-            b"=yend size=100\r\n"
-        )
+        not_begin = b"not_ybegin\r\n" + valid_hdr + b"\r\n" b"=yend size=100\r\n"
         with pytest.raises(ValueError, match="Line 1 does not start with =ybegin"):
             extract_and_remove_yencryption(not_begin)
 
@@ -973,7 +959,9 @@ class TestDirectWriteGatingAndFailover:
         body_encoded, body_crc = sabctools.yenc_encode(ct)
 
         line1_pt = f"=ybegin line=128 size={len(ct)} name=test.bin".encode("ascii")
-        line2_pt = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} index={segment_index:08x} tag={tag.hex()}".encode("ascii")
+        line2_pt = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} index={segment_index:08x} tag={tag.hex()}".encode(
+            "ascii"
+        )
         line3_pt = body_encoded
         line4_pt = f"=yend size={len(ct)} crc32={body_crc:08x}".encode("ascii")
 
@@ -988,7 +976,9 @@ class TestDirectWriteGatingAndFailover:
         valid_body = wire1 + b"\r\n" + wire2 + b"\r\n" + wire3 + b"\r\n" + wire4 + b"\r\n"
 
         bad_tag = bytes([tag[0] ^ 0xFF]) + tag[1:]
-        line2_bad_pt = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} index={segment_index:08x} tag={bad_tag.hex()}".encode("ascii")
+        line2_bad_pt = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} index={segment_index:08x} tag={bad_tag.hex()}".encode(
+            "ascii"
+        )
         wire2_bad = ff1_encrypt(k2, t2, line2_bad_pt)
         bad_body = wire1 + b"\r\n" + wire2_bad + b"\r\n" + wire3 + b"\r\n" + wire4 + b"\r\n"
 
@@ -1133,6 +1123,3 @@ class TestDirectWriteGatingAndFailover:
         finally:
             srv1.stop()
             srv2.stop()
-
-
-

@@ -577,9 +577,7 @@ class Downloader(Thread):
         )
 
         if not response or (
-            not response.bytes_decoded
-            and not article.nzf.nzo.precheck
-            and not (has_lines and is_encrypted)
+            not response.bytes_decoded and not article.nzf.nzo.precheck and not (has_lines and is_encrypted)
         ):
             if not article.search_new_server():
                 article.nzf.nzo.increase_bad_articles_counter("missing_articles")

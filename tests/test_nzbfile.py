@@ -30,7 +30,6 @@ from sabnzbd.nzb import NzbFile, NzbObject, Article
 from tests.testhelper import SAB_CACHE_DIR
 
 
-
 @pytest.mark.usefixtures("clean_cache_dir")
 class TestNzbFile:
     @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
@@ -263,4 +262,3 @@ class TestNzbFile:
         assert art_restored.article == "clean1@test"
         assert art_restored.part_number == 1
         assert art_restored.segment_index is None
-

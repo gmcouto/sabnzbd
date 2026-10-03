@@ -572,10 +572,7 @@ def nzbfile_parser(full_nzb_path: str, nzo, force_encrypted: bool = False):
 
         # Build final raw_article_db_sorted and create NzbFiles
         for f in parsed_files:
-            raw_article_db_sorted = [
-                (art[0], art[1], art[2], art[3])
-                for art in f["raw_articles"]
-            ]
+            raw_article_db_sorted = [(art[0], art[1], art[2], art[3]) for art in f["raw_articles"]]
 
             try:
                 nzf = NzbFile(

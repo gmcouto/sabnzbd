@@ -229,10 +229,7 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
         import sabctools
         from sabnzbd.encryption import DecryptionAdapter, extract_and_remove_yencryption
 
-        lines = [
-            line.encode("latin-1") if isinstance(line, str) else line
-            for line in response.lines
-        ]
+        lines = [line.encode("latin-1") if isinstance(line, str) else line for line in response.lines]
         raw_wire = b"\r\n".join(lines) + b"\r\n"
 
         adapter = DecryptionAdapter(password=password)

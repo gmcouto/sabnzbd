@@ -29,7 +29,6 @@ import argon2.low_level as ll
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 import nacl.bindings as nb
 
-
 BOOTSTRAP_PREFIX_LEN = 20
 
 
@@ -363,7 +362,17 @@ class DecryptionAdapter:
         self.password: Optional[str] = password
         self._key_cache: dict[bytes, bytes] = {}
 
-    def _derive_argon2id(self, secret: bytes, salt: bytes, time_cost: int, memory_cost: int, parallelism: int, hash_len: int, type: Any, version: int) -> bytes:
+    def _derive_argon2id(
+        self,
+        secret: bytes,
+        salt: bytes,
+        time_cost: int,
+        memory_cost: int,
+        parallelism: int,
+        hash_len: int,
+        type: Any,
+        version: int,
+    ) -> bytes:
         return ll.hash_secret_raw(
             secret=secret,
             salt=salt,
@@ -434,9 +443,7 @@ class DecryptionAdapter:
         """Decrypt a single control line with FF1 over Radix 253."""
         return ff1_decrypt(enc_key, tweak, ciphertext, radix)
 
-    def restore_control_lines(
-        self, yenc_block: bytes, segment_index: Optional[int] = None
-    ) -> tuple[bytes, bytes, int]:
+    def restore_control_lines(self, yenc_block: bytes, segment_index: Optional[int] = None) -> tuple[bytes, bytes, int]:
         """Restore encrypted control lines in a yEnc article block per Standard v1.1.
 
         Returns (restored_yenc_block, salt, segment_index).

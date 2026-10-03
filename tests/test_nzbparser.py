@@ -36,7 +36,6 @@ def _write_nzb_gz(cache_dir: str, name: str, xml_content: str) -> str:
     return path
 
 
-
 @pytest.mark.usefixtures("clean_cache_dir")
 class TestNzbParser:
     @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
@@ -184,4 +183,3 @@ class TestNzbParser:
         # The password metadata must still be present in nzo.meta for downstream consumption
         assert nzo.meta.get("password") == [secret_sentinel]
         assert nzo.meta.get("category") == ["movies"]
-
