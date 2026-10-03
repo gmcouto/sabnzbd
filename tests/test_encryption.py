@@ -1338,3 +1338,160 @@ class TestCycle1AdversarialRemediation:
 
         # Empty input
         assert split_lines_preserving_endings(b"") == []
+
+    def test_c2_01_restore_control_lines_min_lines_truncated(self):
+        """C2-01: restore_control_lines rejects truncated blocks below min line count."""
+        from sabnzbd.encryption import DecryptionAdapter
+
+        adapter = DecryptionAdapter(password="testpass")
+        salt = b"\x02" * 16
+        master_key = adapter.get_master_key(salt)
+        seg_idx = 1
+
+        k1, t1 = adapter.derive_control_keys(master_key, seg_idx, 1)
+        ct1 = adapter.encrypt_control_line(b"=ybegin line=128 size=50 name=test.bin", k1, t1)
+        wire_line1 = salt + seg_idx.to_bytes(4, "big") + ct1 + b"\r\n"
+
+        # 1 line total, minimum is 2
+        truncated_single = wire_line1
+        with pytest.raises(ValueError, match="Article block too short for encrypted yEnc"):
+            adapter.restore_control_lines(truncated_single, seg_idx)
+
+    def test_c2_02_restore_control_lines_strict_sequence(self):
+        """C2-02: restore_control_lines strictly validates header sequence and missing =yencryption."""
+        from sabnzbd.encryption import DecryptionAdapter
+
+        adapter = DecryptionAdapter(password="testpass")
+        salt = b"\x03" * 16
+        master_key = adapter.get_master_key(salt)
+        seg_idx = 1
+
+        k1, t1 = adapter.derive_control_keys(master_key, seg_idx, 1)
+        k2, t2 = adapter.derive_control_keys(master_key, seg_idx, 2)
+        k4, t4 = adapter.derive_control_keys(master_key, seg_idx, 4)
+
+        # Singlepart line 2 decrypts to =ypart instead of =yencryption -> must fail
+        ct1 = adapter.encrypt_control_line(b"=ybegin line=128 size=50 name=test.bin", k1, t1)
+        wire_line1 = salt + seg_idx.to_bytes(4, "big") + ct1 + b"\r\n"
+        ct2_bad = adapter.encrypt_control_line(b"=ypart begin=1 end=50", k2, t2)
+        wire_line2_bad = ct2_bad + b"\r\n"
+        ct4 = adapter.encrypt_control_line(b"=yend size=50 crc32=12345678", k4, t4)
+        wire_footer = ct4 + b"\r\n"
+
+        bad_single = wire_line1 + wire_line2_bad + b"DATA\r\n" + wire_footer
+        with pytest.raises(ValueError, match="Header line 2 does not start with =yencryption"):
+            adapter.restore_control_lines(bad_single, seg_idx)
+
+        # Multipart line 2 decrypts to =yencryption instead of =ypart -> must fail
+        ct1_multi = adapter.encrypt_control_line(b"=ybegin part=1 line=128 size=50 name=test.bin", k1, t1)
+        wire_multi1 = salt + seg_idx.to_bytes(4, "big") + ct1_multi + b"\r\n"
+        ct2_multi_bad = adapter.encrypt_control_line(
+            b"=yencryption cipher=XChaCha20-Poly1305 index=00000001 salt="
+            + salt.hex().encode("ascii")
+            + b" tag="
+            + (b"00" * 16),
+            k2,
+            t2,
+        )
+        wire_multi2_bad = ct2_multi_bad + b"\r\n"
+        bad_multi = wire_multi1 + wire_multi2_bad + b"DATA\r\n" + wire_footer
+        with pytest.raises(ValueError, match="Multipart line 2 does not start with =ypart"):
+            adapter.restore_control_lines(bad_multi, seg_idx)
+
+    def test_c2_03_restore_control_lines_trailing_blank_lines(self):
+        """C2-03: restore_control_lines handles trailing blank lines after footer without crashing."""
+        from sabnzbd.encryption import DecryptionAdapter
+
+        adapter = DecryptionAdapter(password="testpass")
+        salt = b"\x04" * 16
+        master_key = adapter.get_master_key(salt)
+        seg_idx = 1
+
+        k1, t1 = adapter.derive_control_keys(master_key, seg_idx, 1)
+        k2, t2 = adapter.derive_control_keys(master_key, seg_idx, 2)
+        k4, t4 = adapter.derive_control_keys(master_key, seg_idx, 4)
+
+        ct1 = adapter.encrypt_control_line(b"=ybegin line=128 size=50 name=test.bin", k1, t1)
+        wire_line1 = salt + seg_idx.to_bytes(4, "big") + ct1 + b"\r\n"
+        ct2 = adapter.encrypt_control_line(
+            b"=yencryption cipher=XChaCha20-Poly1305 index=00000001 salt="
+            + salt.hex().encode("ascii")
+            + b" tag="
+            + (b"00" * 16),
+            k2,
+            t2,
+        )
+        wire_line2 = ct2 + b"\r\n"
+        data_line = b"PAYLOAD DATA LINE\r\n"
+        ct4 = adapter.encrypt_control_line(b"=yend size=50 crc32=12345678", k4, t4)
+        wire_footer = ct4 + b"\r\n"
+
+        wire_with_trailing_blanks = wire_line1 + wire_line2 + data_line + wire_footer + b"\r\n\r\n"
+        restored, out_salt, out_idx = adapter.restore_control_lines(wire_with_trailing_blanks, seg_idx)
+        assert b"=yend size=50" in restored
+        assert restored.endswith(b"\r\n\r\n")
+        assert out_salt == salt
+        assert out_idx == seg_idx
+
+    def test_c2_04_extract_bootstrap_line1_max_length(self):
+        """C2-04: extract_bootstrap_from_line1 enforces upper bound on line 1 length."""
+        from sabnzbd.encryption import extract_bootstrap_from_line1
+
+        salt = b"\x05" * 16
+        seg_bytes = (1).to_bytes(4, "big")
+        valid_prefix = salt + seg_bytes
+
+        # 4096 bytes is valid
+        line_ok = valid_prefix + b"A" * (4096 - 20)
+        s, idx = extract_bootstrap_from_line1(line_ok)
+        assert s == salt
+        assert idx == 1
+
+        # 4097 bytes exceeds maximum
+        line_too_long = valid_prefix + b"A" * (4097 - 20)
+        with pytest.raises(ValueError, match="Line 1 too long"):
+            extract_bootstrap_from_line1(line_too_long)
+
+    def test_c2_05_decoder_dual_index_mismatch_fails_closed(self):
+        """C2-05: decode_article fails closed when NZB segment_index disagrees with wire index."""
+        import sabctools
+        import sabnzbd.decoder as decoder
+        from sabnzbd.encryption import DecryptionAdapter
+
+        adapter = DecryptionAdapter(password="testpass")
+        salt = b"\x06" * 16
+        master_key = adapter.get_master_key(salt)
+        wire_seg_idx = 2
+
+        k1, t1 = adapter.derive_control_keys(master_key, wire_seg_idx, 1)
+        k2, t2 = adapter.derive_control_keys(master_key, wire_seg_idx, 2)
+        k3, t3 = adapter.derive_control_keys(master_key, wire_seg_idx, 3)
+
+        ct1 = adapter.encrypt_control_line(b"=ybegin line=128 size=0 name=test.bin", k1, t1)
+        wire_line1 = salt + wire_seg_idx.to_bytes(4, "big") + ct1
+        ct2 = adapter.encrypt_control_line(
+            b"=yencryption cipher=XChaCha20-Poly1305 index=00000002 salt="
+            + salt.hex().encode("ascii")
+            + b" tag="
+            + (b"00" * 16),
+            k2,
+            t2,
+        )
+        wire_line2 = ct2
+        ct3 = adapter.encrypt_control_line(b"=yend size=0 crc32=00000000", k3, t3)
+        wire_line3 = ct3
+
+        mock_article = mock.MagicMock(spec=Article)
+        mock_article.segment_index = 1  # NZB claims 1, wire has 2
+        mock_article.password = "testpass"
+        mock_article.nzf.nzo.password = "testpass"
+        mock_article.nzf.nzo.yenc_encrypted = True
+        mock_article.nzf.nzo._decryption_adapter = adapter
+
+        mock_response = mock.MagicMock(spec=sabctools.NNTPResponse)
+        mock_response.sink_failed = False
+        mock_response.bytes_decoded = 0
+        mock_response.lines = [wire_line1, wire_line2, wire_line3]
+
+        with pytest.raises(ValueError, match="Dual index mismatch"):
+            decoder.decode_yenc(mock_article, mock_response)

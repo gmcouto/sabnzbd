@@ -308,10 +308,12 @@ def extract_and_remove_yencryption(yenc_block: bytes) -> tuple[dict[str, Any], b
 def extract_bootstrap_from_line1(line1: bytes) -> tuple[bytes, int]:
     """Extract and validate 20-byte bootstrap prefix ([16B salt][4B uint32_be(segmentIndex)]) from Line 1.
 
-    Ensures line is at least 22 bytes, salt contains no forbidden bytes, and segment_index > 0.
+    Ensures line is at least 22 bytes, at most 4096 bytes, salt contains no forbidden bytes, and segment_index > 0.
     """
     if len(line1) < 22:
         raise ValueError(f"Line 1 truncated: {len(line1)} bytes (minimum 22)")
+    if len(line1) > 4096:
+        raise ValueError(f"Line 1 too long: {len(line1)} bytes (maximum 4096)")
     salt = line1[:16]
     for b in salt:
         if b in (0x00, 0x0A, 0x0D):
@@ -459,6 +461,14 @@ class DecryptionAdapter:
         if not raw_lines:
             return yenc_block, b"", 0
 
+        # Preserve trailing blank lines if present, while finding true footer line
+        trailing_lines: list[bytes] = []
+        while raw_lines and not raw_lines[-1].strip():
+            trailing_lines.insert(0, raw_lines.pop())
+
+        if not raw_lines:
+            return yenc_block, b"", 0
+
         # Extract line ending from line 1
         line1_raw = raw_lines[0]
         if line1_raw.endswith(b"\r\n"):
@@ -485,11 +495,14 @@ class DecryptionAdapter:
         if not pt1.startswith(b"=ybegin"):
             raise ValueError("Control line decrypt failure: line 1 does not start with =ybegin")
 
+        is_multipart = any(token.startswith(b"part=") for token in pt1.split())
+        if len(raw_lines) < 2:
+            raise ValueError(f"Article block too short for encrypted yEnc: {len(raw_lines)} line(s) (minimum 2)")
+
+        max_header_lines = 3 if is_multipart else 2
+
         restored_lines: list[bytes] = [pt1 + ending]
         n_total = len(raw_lines)
-
-        is_multipart = any(token.startswith(b"part=") for token in pt1.split())
-        max_header_lines = 3 if is_multipart else 2
 
         in_header = True
         for idx in range(1, n_total - 1):
@@ -509,37 +522,47 @@ class DecryptionAdapter:
                 enc_key, tweak = self.derive_control_keys(master_key, line1_segment_index, line_index)
                 try:
                     pt = self.decrypt_control_line(content, enc_key, tweak)
-                    if pt.startswith(b"=y"):
-                        restored_lines.append(pt + line_ending)
-                        if pt.startswith(b"=yencryption"):
-                            in_header = False
-                    else:
-                        in_header = False
-                        restored_lines.append(raw_line)
                 except Exception:
+                    pt = None
+
+                if pt and pt.startswith(b"=y"):
+                    if is_multipart and line_index == 2:
+                        if not pt.startswith(b"=ypart"):
+                            raise ValueError("Multipart line 2 does not start with =ypart")
+                    elif not is_multipart and line_index == 2:
+                        if not pt.startswith(b"=yencryption"):
+                            raise ValueError(f"Header line {line_index} does not start with =yencryption")
+                        in_header = False
+                    elif is_multipart and line_index == 3:
+                        if not pt.startswith(b"=yencryption"):
+                            raise ValueError(f"Header line {line_index} does not start with =yencryption")
+                        in_header = False
+                    restored_lines.append(pt + line_ending)
+                else:
                     in_header = False
                     restored_lines.append(raw_line)
             else:
                 restored_lines.append(raw_line)
 
         # Final line (footer)
-        if n_total > 1:
-            raw_footer = raw_lines[-1]
-            if raw_footer.endswith(b"\r\n"):
-                footer_ending = b"\r\n"
-                footer_content = raw_footer[:-2]
-            elif raw_footer.endswith(b"\n"):
-                footer_ending = b"\n"
-                footer_content = raw_footer[:-1]
-            else:
-                footer_ending = b""
-                footer_content = raw_footer
+        raw_footer = raw_lines[-1]
+        if raw_footer.endswith(b"\r\n"):
+            footer_ending = b"\r\n"
+            footer_content = raw_footer[:-2]
+        elif raw_footer.endswith(b"\n"):
+            footer_ending = b"\n"
+            footer_content = raw_footer[:-1]
+        else:
+            footer_ending = b""
+            footer_content = raw_footer
 
-            footer_line_index = n_total
-            enc_key, tweak = self.derive_control_keys(master_key, line1_segment_index, footer_line_index)
-            pt_footer = self.decrypt_control_line(footer_content, enc_key, tweak)
-            if not pt_footer.startswith(b"=yend"):
-                raise ValueError("Control line decrypt failure: footer does not start with =yend")
-            restored_lines.append(pt_footer + footer_ending)
+        footer_line_index = n_total
+        enc_key, tweak = self.derive_control_keys(master_key, line1_segment_index, footer_line_index)
+        pt_footer = self.decrypt_control_line(footer_content, enc_key, tweak)
+        if not pt_footer.startswith(b"=yend"):
+            raise ValueError("Control line decrypt failure: footer does not start with =yend")
+        restored_lines.append(pt_footer + footer_ending)
+        if trailing_lines:
+            restored_lines.extend(trailing_lines)
 
         return b"".join(restored_lines), salt, line1_segment_index

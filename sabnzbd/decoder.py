@@ -259,7 +259,10 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
         raw_wire = b"\r\n".join(lines) + b"\r\n"
 
         adapter = _get_decryption_adapter(article, password=password)
-        restored_block, salt_line1, seg_idx_line1 = adapter.restore_control_lines(raw_wire)
+        nzb_seg_idx = getattr(article, "segment_index", None)
+        if not isinstance(nzb_seg_idx, int):
+            nzb_seg_idx = None
+        restored_block, salt_line1, seg_idx_line1 = adapter.restore_control_lines(raw_wire, segment_index=nzb_seg_idx)
         yenc_params, clean_yenc = extract_and_remove_yencryption(restored_block)
 
         if yenc_params["salt"] != salt_line1:
@@ -271,6 +274,9 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
             raise ValueError(
                 f"Dual index mismatch between control line 1 ({seg_idx_line1}) and =yencryption ({yenc_params['segment_index']})"
             )
+
+        if nzb_seg_idx is not None and nzb_seg_idx != seg_idx_line1:
+            raise ValueError(f"Dual index mismatch: NZB segment_index {nzb_seg_idx} != wire index {seg_idx_line1}")
 
         art_id = getattr(article, "article", "enc")
         if isinstance(art_id, str):

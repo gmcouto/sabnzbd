@@ -262,3 +262,66 @@ class TestNzbFile:
         assert art_restored.article == "clean1@test"
         assert art_restored.part_number == 1
         assert art_restored.segment_index is None
+
+    def test_c2_06_nzbfile_and_article_unpickle_safe_none_and_lock_rebind(self):
+        """C2-06: NzbFile unpickling tolerates None for articles/decodetable and Article rebinds lock to nzf."""
+        nzo = NzbObject("test_c2_06")
+        nzf = NzbFile(
+            date=datetime.now(),
+            subject="c2_06.bin",
+            raw_article_db=[("art1@test", 500, 1, 100)],
+            file_bytes=500,
+            nzo=nzo,
+        )
+        art = nzf.decodetable[0]
+
+        # Article __setstate__ rebinds to nzf.lock
+        art_pickled = pickle.dumps(art)
+        art_restored: Article = pickle.loads(art_pickled)
+        assert art_restored.lock == art_restored.nzf.lock
+
+        # NzbFile __setstate__ with None articles and None decodetable
+        nzf_dict = nzf.__getstate__()
+        nzf_dict["articles"] = None
+        nzf_dict["decodetable"] = None
+
+        restored_nzf = NzbFile(
+            date=datetime.now(),
+            subject="tmp.bin",
+            raw_article_db=[],
+            file_bytes=0,
+            nzo=nzo,
+        )
+        restored_nzf.__setstate__(nzf_dict)
+        assert restored_nzf.articles == {}
+        assert restored_nzf.decodetable == []
+
+    def test_c2_07_nzo_attribute_saver_preserves_yenc_encrypted(self):
+        """C2-07: NzoAttributeSaver and load_attribs preserve yenc_encrypted across job retry."""
+        from sabnzbd.nzb.object import NzoAttributeSaver
+
+        assert "yenc_encrypted" in NzoAttributeSaver
+
+        nzo = NzbObject("test_retry_enc")
+        nzo.yenc_encrypted = True
+
+        saved = {}
+
+        def mock_save_data(data, filename, path, silent=True):
+            saved.update(data)
+
+        def mock_load_data(filename, path, remove=False):
+            return dict(saved)
+
+        with (
+            mock.patch("sabnzbd.nzb.object.save_data", side_effect=mock_save_data),
+            mock.patch("sabnzbd.nzb.object.load_data", side_effect=mock_load_data),
+        ):
+            nzo.save_attribs()
+            assert saved.get("yenc_encrypted") is True
+
+            nzo2 = NzbObject("test_retry_enc")
+            assert nzo2.yenc_encrypted is False
+
+            nzo2.load_attribs()
+            assert nzo2.yenc_encrypted is True

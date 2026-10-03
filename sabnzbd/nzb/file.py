@@ -395,12 +395,16 @@ class NzbFile(TryList):
         self.file_lock = threading.RLock()
         self.assembler_next_index = 0
         self.writer = None
-        if isinstance(self.articles, list):
+        if self.articles is None:
+            self.articles = {}
+        elif isinstance(self.articles, list):
             # Converted from list to dict
             self.articles = {x: x for x in self.articles}
         for article in self.articles:
             article.lock = self.lock
-        if self.decodetable:
+        if self.decodetable is None:
+            self.decodetable = []
+        else:
             for article in self.decodetable:
                 article.lock = self.lock
         super().__setstate__(dict_.get("try_list", []))

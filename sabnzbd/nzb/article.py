@@ -230,7 +230,10 @@ class Article(TryList):
             except KeyError:
                 # Handle new attributes
                 setattr(self, item, None)
-        self.lock = threading.RLock()
+        if self.nzf and hasattr(self.nzf, "lock") and self.nzf.lock is not None:
+            self.lock = self.nzf.lock
+        else:
+            self.lock = threading.RLock()
         super().__setstate__(dict_.get("try_list", []))
         self.fetcher = None
         self.fetcher_priority = 0
