@@ -23,6 +23,7 @@ import hashlib
 import hmac
 import math
 import struct
+import threading
 from typing import Any, Optional
 
 import argon2.low_level as ll
@@ -331,7 +332,7 @@ def extract_salt_from_line1(line1: bytes) -> bytes:
 
 
 def split_lines_preserving_endings(input_bytes: bytes) -> list[bytes]:
-    """Split bytes into lines preserving endings, skipping Line 1 bootstrap prefix.
+    """Split bytes into lines while preserving \r\n, \n, or \r endings.
 
     For encrypted wire articles (which do not begin with =y), Line 1 carries a
     20-byte bootstrap prefix ([16B salt][4B uint32_be(segmentIndex)]). Because
@@ -350,7 +351,8 @@ def split_lines_preserving_endings(input_bytes: bytes) -> list[bytes]:
             pos = idx + 1
             lines.append(input_bytes[start:pos])
         else:
-            lines.append(input_bytes[start:])
+            if start < total:
+                lines.append(input_bytes[start:])
             break
     return lines
 
@@ -361,6 +363,7 @@ class DecryptionAdapter:
     def __init__(self, password: Optional[str] = None):
         self.password: Optional[str] = password
         self._key_cache: dict[bytes, bytes] = {}
+        self._lock = threading.Lock()
 
     def _derive_argon2id(
         self,
@@ -385,23 +388,27 @@ class DecryptionAdapter:
         )
 
     def get_master_key(self, salt: bytes) -> bytes:
-        """Derive 32-byte master key via Argon2id RFC 9106, caching by salt."""
-        if salt in self._key_cache:
-            return self._key_cache[salt]
+        """Derive 32-byte master key via Argon2id RFC 9106, thread-safely caching by salt."""
+        with self._lock:
+            if salt in self._key_cache:
+                return self._key_cache[salt]
         if not self.password:
             raise ValueError("Password required for decryption but none provided")
-        key = self._derive_argon2id(
-            secret=self.password.encode("utf-8"),
-            salt=salt,
-            time_cost=1,
-            memory_cost=65536,  # 64 MiB
-            parallelism=4,
-            hash_len=32,
-            type=ll.Type.ID,
-            version=0x13,
-        )
-        self._key_cache[salt] = key
-        return key
+        with self._lock:
+            if salt in self._key_cache:
+                return self._key_cache[salt]
+            key = self._derive_argon2id(
+                secret=self.password.encode("utf-8"),
+                salt=salt,
+                time_cost=1,
+                memory_cost=65536,  # 64 MiB
+                parallelism=4,
+                hash_len=32,
+                type=ll.Type.ID,
+                version=0x13,
+            )
+            self._key_cache[salt] = key
+            return key
 
     def derive_key(self, salt: bytes) -> bytes:
         return self.get_master_key(salt)
@@ -481,6 +488,9 @@ class DecryptionAdapter:
         restored_lines: list[bytes] = [pt1 + ending]
         n_total = len(raw_lines)
 
+        is_multipart = any(token.startswith(b"part=") for token in pt1.split())
+        max_header_lines = 3 if is_multipart else 2
+
         in_header = True
         for idx in range(1, n_total - 1):
             raw_line = raw_lines[idx]
@@ -495,12 +505,14 @@ class DecryptionAdapter:
                 content = raw_line
 
             line_index = idx + 1
-            if in_header:
+            if line_index <= max_header_lines and in_header:
                 enc_key, tweak = self.derive_control_keys(master_key, line1_segment_index, line_index)
                 try:
                     pt = self.decrypt_control_line(content, enc_key, tweak)
                     if pt.startswith(b"=y"):
                         restored_lines.append(pt + line_ending)
+                        if pt.startswith(b"=yencryption"):
+                            in_header = False
                     else:
                         in_header = False
                         restored_lines.append(raw_line)

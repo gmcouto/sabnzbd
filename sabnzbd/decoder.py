@@ -69,6 +69,23 @@ class SinkFailed(Exception):
     """
 
 
+def _get_decryption_adapter(article: Article, password: Optional[str]):
+    """Retrieve cached DecryptionAdapter from the parent Nzo or create a new one."""
+    from sabnzbd.encryption import DecryptionAdapter
+
+    nzf = getattr(article, "nzf", None)
+    nzo = getattr(nzf, "nzo", None)
+    if nzo is not None:
+        with nzo.lock:
+            adapter = getattr(nzo, "_decryption_adapter", None)
+            if adapter is not None and adapter.password == password:
+                return adapter
+            adapter = DecryptionAdapter(password=password)
+            nzo._decryption_adapter = adapter
+            return adapter
+    return DecryptionAdapter(password=password)
+
+
 def decode(article: Article, decoder: sabctools.NNTPResponse):
     decoded_data: Optional[bytearray] = None
     nzo = article.nzf.nzo
@@ -106,8 +123,17 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
         if search_new_server(article):
             return
 
-        # Store data, maybe par2 can still fix it
-        decoded_data = error.data
+        is_encrypted = (
+            getattr(getattr(getattr(article, "nzf", None), "nzo", None), "yenc_encrypted", False)
+            or getattr(article, "segment_index", None) is not None
+            or bool(getattr(getattr(getattr(article, "nzf", None), "nzo", None), "password", None))
+        )
+        if is_encrypted:
+            logging.info("Discarding corrupt encrypted article data for %s (zero-output guarantee)", art_id)
+            decoded_data = None
+        else:
+            # Store data, maybe par2 can still fix it
+            decoded_data = error.data
 
     except BadUu:
         logging.info("Badly formed uu article in %s", art_id)
@@ -227,12 +253,12 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
     if response.bytes_decoded == 0 and getattr(response, "lines", None) and password:
         import io
         import sabctools
-        from sabnzbd.encryption import DecryptionAdapter, extract_and_remove_yencryption
+        from sabnzbd.encryption import extract_and_remove_yencryption
 
         lines = [line.encode("latin-1") if isinstance(line, str) else line for line in response.lines]
         raw_wire = b"\r\n".join(lines) + b"\r\n"
 
-        adapter = DecryptionAdapter(password=password)
+        adapter = _get_decryption_adapter(article, password=password)
         restored_block, salt_line1, seg_idx_line1 = adapter.restore_control_lines(raw_wire)
         yenc_params, clean_yenc = extract_and_remove_yencryption(restored_block)
 
@@ -318,19 +344,26 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
 
             parsed_enc = parse_yencryption_line(yenc_info)
 
-    if parsed_enc and decoded_data is not None:
+    if parsed_enc:
+        if decoded_data is None:
+            raise SinkFailed("Direct-write occurred on encrypted article before authentication")
+
+        if hasattr(article, "nzf") and hasattr(article.nzf, "nzo"):
+            article.nzf.nzo.yenc_encrypted = True
+
         password = None
         if hasattr(article, "nzf") and hasattr(article.nzf, "nzo"):
             password = getattr(article.nzf.nzo, "password", None)
         if not password and hasattr(article, "password"):
             password = article.password
 
-        from sabnzbd.encryption import DecryptionAdapter
-
-        adapter = DecryptionAdapter(password=password)
+        adapter = _get_decryption_adapter(article, password=password)
         segment_index = getattr(article, "segment_index", None)
+        wire_index = parsed_enc.get("segment_index")
+        if segment_index is not None and wire_index is not None and segment_index != wire_index:
+            raise ValueError(f"Dual index mismatch: NZB segment_index {segment_index} != wire index {wire_index}")
         if segment_index is None:
-            segment_index = parsed_enc.get("segment_index")
+            segment_index = wire_index
         if segment_index is None:
             raise ValueError(f"Missing explicit segment_index for encrypted article {getattr(article, 'article', '')}")
 

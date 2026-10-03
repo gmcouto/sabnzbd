@@ -1123,3 +1123,218 @@ class TestDirectWriteGatingAndFailover:
         finally:
             srv1.stop()
             srv2.stop()
+
+
+class TestCycle1AdversarialRemediation:
+    """Cycle 1 adversarial review remediation regression tests [ADV-SABNZBD-01]."""
+
+    def test_c1_01_adapter_key_cache_thread_safety(self):
+        """C1-01: DecryptionAdapter._key_cache thread-safety under concurrent access."""
+        import concurrent.futures
+        from sabnzbd.encryption import DecryptionAdapter
+
+        adapter = DecryptionAdapter(password="concurrent_test_pass")
+        salt = bytes.fromhex("11223344556677889900aabbccddeeff")
+        results = []
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            futures = [executor.submit(adapter.get_master_key, salt) for _ in range(16)]
+            for f in concurrent.futures.as_completed(futures):
+                results.append(f.result())
+
+        assert len(results) == 16
+        # All threads must receive the identical derived key
+        assert all(r == results[0] for r in results)
+        assert len(results[0]) == 32
+        # Exactly one entry in key cache
+        assert salt in adapter._key_cache
+
+    def test_c1_02_restore_control_lines_header_bounded(self):
+        """C1-02: restore_control_lines bounds header restoration and stops at =yencryption."""
+        from sabnzbd.encryption import DecryptionAdapter
+
+        adapter = DecryptionAdapter(password="test123")
+        salt = b"\x01" * 16
+        master_key = adapter.get_master_key(salt)
+        seg_idx = 1
+
+        # Single-part: line 1 =ybegin, line 2 =yencryption, line 3 = data line, line 4 = =yend
+        k1, t1 = adapter.derive_control_keys(master_key, seg_idx, 1)
+        k2, t2 = adapter.derive_control_keys(master_key, seg_idx, 2)
+        k4, t4 = adapter.derive_control_keys(master_key, seg_idx, 4)
+
+        ct1 = adapter.encrypt_control_line(b"=ybegin line=128 size=50 name=test.bin", k1, t1)
+        wire_line1 = salt + seg_idx.to_bytes(4, "big") + ct1 + b"\r\n"
+
+        ct2 = adapter.encrypt_control_line(b"=yencryption cipher=XChaCha20-Poly1305 index=1", k2, t2)
+        wire_line2 = ct2 + b"\r\n"
+
+        data_line = b"PAYLOAD DATA LINE NOT CONTROL LINE\r\n"
+
+        ct4 = adapter.encrypt_control_line(b"=yend size=50 crc32=12345678", k4, t4)
+        wire_footer = ct4 + b"\r\n"
+
+        wire_block = wire_line1 + wire_line2 + data_line + wire_footer
+
+        orig_decrypt = adapter.decrypt_control_line
+        decrypt_calls = []
+
+        def tracked_decrypt(ct, enc_key, tweak, radix=253):
+            decrypt_calls.append(ct)
+            return orig_decrypt(ct, enc_key, tweak, radix)
+
+        adapter.decrypt_control_line = tracked_decrypt
+        restored, out_salt, out_idx = adapter.restore_control_lines(wire_block, seg_idx)
+
+        # Header has 2 lines, footer is line 4 -> decrypt_control_line must be called exactly 3 times
+        assert len(decrypt_calls) == 3
+        assert b"PAYLOAD DATA LINE" in restored
+        assert out_salt == salt
+        assert out_idx == seg_idx
+
+    def test_c1_03_decoder_adapter_cached_on_nzo(self):
+        """C1-03: _get_decryption_adapter caches DecryptionAdapter on nzo to eliminate churn."""
+        import threading
+        import sabnzbd.decoder as decoder
+        from sabnzbd.encryption import DecryptionAdapter
+
+        mock_nzo = mock.MagicMock()
+        mock_nzo.lock = threading.RLock()
+        mock_nzo._decryption_adapter = None
+        mock_nzo.password = "shared_password"
+
+        mock_nzf = mock.MagicMock()
+        mock_nzf.nzo = mock_nzo
+
+        art1 = mock.MagicMock(spec=Article)
+        art1.nzf = mock_nzf
+        art1.password = None
+
+        art2 = mock.MagicMock(spec=Article)
+        art2.nzf = mock_nzf
+        art2.password = None
+
+        adapter1 = decoder._get_decryption_adapter(art1, "shared_password")
+        adapter2 = decoder._get_decryption_adapter(art2, "shared_password")
+
+        assert isinstance(adapter1, DecryptionAdapter)
+        assert adapter1 is adapter2
+        assert mock_nzo._decryption_adapter is adapter1
+
+    def test_c1_04_direct_write_sink_leakage_fails_closed(self):
+        """C1-04: Direct-write sink on encrypted article raises SinkFailed and fails closed."""
+        import sabctools
+        import sabnzbd.decoder as decoder
+        from sabnzbd.decoder import SinkFailed
+
+        mock_nzo = mock.MagicMock()
+        mock_nzo.lock = threading.RLock()
+        mock_nzo._decryption_adapter = None
+        mock_nzo.yenc_encrypted = True
+        mock_nzo.precheck = False
+
+        article = mock.MagicMock(spec=Article)
+        article.article = "leak@sink"
+        article.nzf.nzo = mock_nzo
+        article.segment_index = 1
+        article.search_new_server.return_value = False
+        article.on_disk = False
+
+        # response.data is None simulates sabctools streaming straight to disk file
+        response = mock.MagicMock(spec=sabctools.NNTPResponse)
+        response.sink_failed = False
+        response.format = sabctools.EncodingFormat.YENC
+        response.data = None
+        response.bytes_decoded = 500
+        response.lines = None
+        response.yencryption = {
+            "cipher": "XChaCha20-Poly1305",
+            "salt": b"\x01" * 16,
+            "tag": b"\x02" * 16,
+            "segment_index": 1,
+        }
+
+        # decode_yenc must raise SinkFailed
+        with pytest.raises(SinkFailed, match="Direct-write occurred on encrypted article"):
+            decoder.decode_yenc(article, response)
+
+        # decode() catching SinkFailed must NOT mark article.on_disk
+        mock_cache = mock.MagicMock()
+        mock_queue = mock.MagicMock()
+        with (
+            mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
+            mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
+        ):
+            decoder.decode(article, response)
+            assert not article.on_disk
+            assert not mock_cache.save_article.called
+            mock_queue.register_article.assert_called_with(article, False)
+
+    def test_c1_06_dual_index_mismatch_in_body_encrypted_article(self):
+        """C1-06: Dual index mismatch between NZB segment_index and wire header raises ValueError."""
+        import sabctools
+        import sabnzbd.decoder as decoder
+
+        article = mock.MagicMock(spec=Article)
+        article.article = "mismatch@dual"
+        article.nzf.nzo.password = "test123"
+        article.segment_index = 1  # From NZB
+
+        response = mock.MagicMock(spec=sabctools.NNTPResponse)
+        response.sink_failed = False
+        response.format = sabctools.EncodingFormat.YENC
+        response.data = bytearray(b"dummy_ciphertext")
+        response.bytes_decoded = len(response.data)
+        response.lines = None
+        response.yencryption = {
+            "cipher": "XChaCha20-Poly1305",
+            "salt": b"\x01" * 16,
+            "tag": b"\x02" * 16,
+            "segment_index": 2,  # Wire mismatch: 2 != 1
+        }
+
+        with pytest.raises(ValueError, match="Dual index mismatch: NZB segment_index 1 != wire index 2"):
+            decoder.decode_yenc(article, response)
+
+    def test_c1_07_bad_data_zero_output_guarantee(self):
+        """C1-07: BadData on encrypted article discards data and preserves zero-output guarantee."""
+        import sabctools
+        import sabnzbd.decoder as decoder
+        from sabnzbd.decoder import BadData
+
+        article = mock.MagicMock(spec=Article)
+        article.article = "baddata@enc"
+        article.nzf.nzo.yenc_encrypted = True
+        article.nzf.nzo.precheck = False
+        article.segment_index = 1
+        article.search_new_server.return_value = False
+        article.on_disk = False
+
+        response = mock.MagicMock(spec=sabctools.NNTPResponse)
+        mock_cache = mock.MagicMock()
+        mock_queue = mock.MagicMock()
+
+        # Simulate BadData raised by decoder
+        with (
+            mock.patch("sabnzbd.decoder.decode_yenc", side_effect=BadData(bytearray(b"corrupt_ciphertext"))),
+            mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
+            mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
+        ):
+            decoder.decode(article, response)
+            assert not mock_cache.save_article.called
+            assert not article.on_disk
+            mock_queue.register_article.assert_called_with(article, False)
+
+    def test_c1_08_split_lines_preserving_endings(self):
+        """C1-08: split_lines_preserving_endings handles unterminated and empty inputs cleanly."""
+        from sabnzbd.encryption import split_lines_preserving_endings
+
+        # Unterminated trailing line
+        raw = b"=ybegin line=128 size=10\r\n=yend size=10"
+        lines = split_lines_preserving_endings(raw)
+        assert len(lines) == 2
+        assert lines[0] == b"=ybegin line=128 size=10\r\n"
+        assert lines[1] == b"=yend size=10"
+
+        # Empty input
+        assert split_lines_preserving_endings(b"") == []
