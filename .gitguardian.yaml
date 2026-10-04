@@ -1,0 +1,44 @@
+version: 2
+secret:
+  ignored_matches:
+    - name: test-fixture-api-key-literal
+      match: api_key = apikey
+    - name: test-password-test123
+      match: test123
+    - name: test-password-testpass
+      match: testpass
+    - name: test-password-wrongpassword
+      match: wrongpassword
+    - name: test-password-wrong-password-999
+      match: wrong_password_999
+    - name: test-password-underscore
+      match: test_password
+    - name: test-password-underscore-123
+      match: test_password_123
+    - name: test-password-rarpass
+      match: rarpass
+    - name: test-password-secret
+      match: secret_pass
+    - name: test-password-multi-server
+      match: multi_server_secret_password
+    - name: test-password-concurrent
+      match: concurrent_test_pass
+    - name: test-password-shared
+      match: shared_password
+    - name: test-csrf-dummy-token
+      match: a-token
+    - name: test-canary-sab-redaction-user
+      match: CANARY_SAB_SECRET_12345
+    - name: test-canary-sab-redaction-meta
+      match: CANARY_META_PW_9999
+    - name: test-canary-sab-retry-secret
+      match: CANARY_SAB_RETRY_SECRET_98765
+    - name: test-vector-password-symbols
+      match: P@ssw0rd with spaces & symbols!#$%
+    - name: test-vector-password-umlaut
+      match: Mötörhëad-Usenet-🔑-2026
+    - name: test-vector-password-alphabet
+      match: A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2W3x4Y5z6
+  ignored_paths:
+    - "**/tests/data/**"
+    - "**/test-vectors/**"
