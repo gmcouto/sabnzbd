@@ -687,8 +687,7 @@ def caller_name(skip: int = 2) -> str:
     if hasattr(sys, "frozen"):
         module_name = inspect.getfile(parentframe)
     else:
-        mod = inspect.getmodule(parentframe)
-        module_name = mod.__name__ if mod else inspect.getfile(parentframe)
+        module_name = inspect.getmodule(parentframe).__name__
 
     # For decorated functions we have to go deeper
     if function_name in ("call_func", "wrap") and skip == 2:
