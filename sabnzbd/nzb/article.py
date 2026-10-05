@@ -76,6 +76,8 @@ class TryList:
 
     def __setstate__(self, servers_ids: list[str]):
         self.try_list = set()
+        # Downloader may be absent when restoring pickled articles outside a running
+        # daemon (e.g. admin-state reload during tests/retry before connect)
         if hasattr(sabnzbd, "Downloader") and sabnzbd.Downloader and hasattr(sabnzbd.Downloader, "servers"):
             for server in sabnzbd.Downloader.servers:
                 if server.id in servers_ids:
