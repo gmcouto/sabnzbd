@@ -69,6 +69,15 @@ class SinkFailed(Exception):
     """
 
 
+def _is_yenc_encrypted(article: Article) -> bool:
+    """Whether the article belongs to a yEnc-encrypted release (not merely password-protected)."""
+    return (
+        bool(getattr(getattr(getattr(article, "nzf", None), "nzo", None), "yenc_encrypted", False))
+        or getattr(article, "segment_index", None) is not None
+        or bool(getattr(article, "yenc_encrypted", False))
+    )
+
+
 def _get_decryption_adapter(article: Article, password: Optional[str]):
     """Retrieve cached DecryptionAdapter from the parent Nzo or create a new one."""
     from sabnzbd.encryption import DecryptionAdapter
@@ -123,14 +132,7 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
         if search_new_server(article):
             return
 
-        is_encrypted = (
-            getattr(getattr(getattr(article, "nzf", None), "nzo", None), "yenc_encrypted", False)
-            or getattr(article, "segment_index", None) is not None
-            or getattr(article, "yenc_encrypted", False)
-            or bool(getattr(getattr(getattr(article, "nzf", None), "nzo", None), "password", None))
-            or bool(getattr(article, "password", None))
-        )
-        if is_encrypted:
+        if _is_yenc_encrypted(article):
             logging.info("Discarding corrupt encrypted article data for %s (zero-output guarantee)", art_id)
             decoded_data = None
         else:
@@ -145,10 +147,14 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
             return
 
     except ValueError:
-        # Authentication failure: log without secrets and query next server
-        logging.info("Authentication failed for %s, trying next server", art_id)
-        if search_new_server(article):
-            return
+        # Authentication failure on encrypted articles: log without secrets and
+        # query next server (retryable provider corruption). Ordinary ValueErrors
+        # keep develop behavior: re-raise so the caller classifies them.
+        if _is_yenc_encrypted(article):
+            logging.info("Authentication failed for %s, trying next server", art_id)
+            if search_new_server(article):
+                return
+        raise
 
     except SinkFailed:
         # The file went away under the article, so it has to be fetched again. Any
@@ -215,7 +221,7 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
         # Causing the decoder-queue to fill up and delay the downloader
         sabnzbd.ArticleCache.save_article(article, decoded_data)
         article.decoded = True
-    elif not nzo.precheck and article_success:
+    elif not nzo.precheck and (article_success or not _is_yenc_encrypted(article)):
         # Either there was nothing to save, or the decoder streamed it straight to the
         # file. Both are on disk as far as the rest of the pipeline is concerned; the
         # assembler advances past an on_disk article on its own when it next runs.
