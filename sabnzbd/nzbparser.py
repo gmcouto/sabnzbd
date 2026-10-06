@@ -52,6 +52,7 @@ from sabnzbd.filesystem import (
     remove_file,
 )
 from sabnzbd.misc import name_to_cat, cat_pp_script_sanitizer
+from sabnzbd.encryption import YEncEncryptionStructuralError
 from sabnzbd.constants import DEFAULT_PRIORITY, VALID_ARCHIVES, AddNzbFileResult
 from sabnzbd.misc import SABRarFile
 import rarfile
@@ -357,6 +358,11 @@ def process_single_nzb(
         # Duplicate or unwanted extension directed to history
         sabnzbd.NzbQueue.fail_to_history(err.nzo)
         nzo_ids.append(err.nzo.nzo_id)
+    except YEncEncryptionStructuralError as err:
+        # Structural yEnc-encryption metadata failure (e.g. encrypted NZB without password):
+        # job-terminal, never retried against any server (zero NNTP contact)
+        logging.error(T("Structural yEnc-encryption failure in %s: %s"), filename, err)
+        result = AddNzbFileResult.ERROR
     except Exception:
         # Something else is wrong, show error
         logging.error(T("Error while adding %s, removing"), filename, exc_info=True)
@@ -376,33 +382,6 @@ def process_single_nzb(
         logging.info("Traceback: ", exc_info=True)
 
     return result, nzo_ids
-
-
-UINT32_MAX = 4294967295
-
-
-def parse_segment_index(val_str: Optional[str]) -> int:
-    """Strictly parse a segmentIndex attribute string per Standard v1.0 Section 8.
-
-    Returns int in range 1..4294967295.
-    Raises ValueError with canonical error token on violation.
-    """
-    if val_str is None or val_str == "":
-        raise ValueError("INVALID_SEGMENT_INDEX_EMPTY")
-    if val_str == "0":
-        raise ValueError("INVALID_SEGMENT_INDEX_ZERO")
-    if val_str.startswith("+") or val_str.startswith("-"):
-        raise ValueError("INVALID_SEGMENT_INDEX_SIGN")
-    if val_str != val_str.strip() or any(c in " \t\n\r" for c in val_str):
-        raise ValueError("INVALID_SEGMENT_INDEX_WHITESPACE")
-    if len(val_str) > 1 and val_str.startswith("0") and val_str.isdigit():
-        raise ValueError("INVALID_SEGMENT_INDEX_LEADING_ZERO")
-    if not (val_str.isascii() and val_str.isdigit()):
-        raise ValueError("INVALID_SEGMENT_INDEX_NON_DIGIT")
-    val = int(val_str)
-    if val > UINT32_MAX:
-        raise ValueError("INVALID_SEGMENT_INDEX_OVERFLOW")
-    return val
 
 
 def nzbfile_parser(full_nzb_path: str, nzo, force_encrypted: bool = False):
@@ -497,8 +476,7 @@ def nzbfile_parser(full_nzb_path: str, nzo, force_encrypted: bool = False):
                                 logging.info("Skipping article %s due to strange size (%s)", article_id, segment_size)
                                 nzo.increase_bad_articles_counter("bad_articles")
                             else:
-                                raw_segment_index = segment.attrib.get("segmentIndex")
-                                raw_article_db[partnum] = (article_id, segment_size, raw_segment_index)
+                                raw_article_db[partnum] = (article_id, segment_size, partnum)
                                 file_bytes += segment_size
                         except Exception:
                             # In case of missing attributes
@@ -511,8 +489,8 @@ def nzbfile_parser(full_nzb_path: str, nzo, force_encrypted: bool = False):
                     continue
 
                 sorted_articles = [
-                    [article_id, segment_size, partnum, raw_segment_index]
-                    for partnum, (article_id, segment_size, raw_segment_index) in sorted(raw_article_db.items())
+                    (article_id, segment_size, partnum)
+                    for partnum, (article_id, segment_size, _partnum) in sorted(raw_article_db.items())
                 ]
                 parsed_files.append(
                     {
@@ -525,16 +503,15 @@ def nzbfile_parser(full_nzb_path: str, nzo, force_encrypted: bool = False):
                 )
                 element.clear()
 
-        # Determine encryption mode and enforce release-wide relational integrity
+        # Determine encryption mode. Segment identity lives solely in the per-article
+        # bootstrap bytes (Line 1) per Standard v1.2 - readers MUST NOT consume legacy
+        # segment-index XML attributes, so no such parsing or inference happens here.
         explicit_yenc = any(v.lower() == "true" for v in nzo.meta.get("yenc_encrypted", []))
-        has_password = bool(nzo.meta.get("password") or getattr(nzo, "password", None))
-        any_has_index = any(art[3] is not None for f in parsed_files for art in f["raw_articles"])
         is_encrypted = (
             force_encrypted
             or getattr(nzo, "force_encrypted", False)
             or getattr(nzo, "yenc_encrypted", False)
             or explicit_yenc
-            or (has_password and any_has_index)
         )
 
         if is_encrypted:
@@ -543,36 +520,19 @@ def nzbfile_parser(full_nzb_path: str, nzo, force_encrypted: bool = False):
             if "true" not in nzo.meta["yenc_encrypted"]:
                 nzo.meta["yenc_encrypted"].append("true")
             nzo.yenc_encrypted = True
-            if any_has_index:
-                seen_indices = set()
-                seen_mids = {}
-                for f in parsed_files:
-                    for art in f["raw_articles"]:
-                        raw_segment_index = art[3]
-                        if raw_segment_index is None:
-                            raise ValueError("MISSING_SEGMENT_INDEX")
-                        seg_idx = parse_segment_index(raw_segment_index)
-                        mid = art[0].strip("<>")
-                        if mid in seen_mids and seen_mids[mid] != seg_idx:
-                            raise ValueError("CONFLICTING_MESSAGE_ID_INDEX")
-                        if mid not in seen_mids:
-                            if seg_idx in seen_indices:
-                                raise ValueError("DUPLICATE_SEGMENT_INDEX")
-                            seen_indices.add(seg_idx)
-                            seen_mids[mid] = seg_idx
-                        art[3] = seg_idx
-            else:
-                for f in parsed_files:
-                    for art in f["raw_articles"]:
-                        art[3] = None
-        else:
-            for f in parsed_files:
-                for art in f["raw_articles"]:
-                    art[3] = None
+
+            # Ingest-time structural validation (METADATA_VALIDATION tier): an encrypted
+            # NZB without a password can never be decrypted, so fail the job HERE - before
+            # queue admission and before any article scheduling or NNTP contact. The
+            # decode-time check in encryption.get_master_key remains as defense-in-depth.
+            if not (nzo.meta.get("password") or getattr(nzo, "password", None)):
+                raise YEncEncryptionStructuralError(
+                    "MISSING_PASSWORD: NZB declares yenc_encrypted=true but no password meta was supplied"
+                )
 
         # Build final raw_article_db_sorted and create NzbFiles
         for f in parsed_files:
-            raw_article_db_sorted = [(art[0], art[1], art[2], art[3]) for art in f["raw_articles"]]
+            raw_article_db_sorted = [(art[0], art[1], art[2]) for art in f["raw_articles"]]
 
             try:
                 nzf = NzbFile(

@@ -27,6 +27,7 @@ import sabnzbd
 from sabnzbd.constants import SABCTOOLS_VERSION_REQUIRED
 from sabnzbd.nzb import Article
 from sabnzbd.misc import match_str
+from sabnzbd.encryption import YEncEncryptionStructuralError
 
 # Check for correct SABCTools version
 SABCTOOLS_VERSION = None
@@ -145,6 +146,15 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
         # Try the next server
         if search_new_server(article):
             return
+
+    except YEncEncryptionStructuralError:
+        # Structural metadata failure (missing password, unsupported mode): abort the
+        # job - never retried against another server. No plaintext or ciphertext was
+        # released (zero-output guarantee), so nothing is stored.
+        logging.error(T("Structural yEnc-encryption failure in %s: job aborted (not retryable)"), art_id)
+        nzo.fail_msg = T("Structural yEnc-encryption failure: missing or invalid metadata")
+        nzo.set_unpack_info("Download", nzo.fail_msg)
+        decoded_data = None
 
     except ValueError:
         # Authentication failure on encrypted articles: log without secrets and
@@ -267,11 +277,14 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
         raw_wire = b"\r\n".join(lines) + b"\r\n"
 
         adapter = _get_decryption_adapter(article, password=password)
-        nzb_seg_idx = getattr(article, "segment_index", None)
-        if not isinstance(nzb_seg_idx, int):
-            nzb_seg_idx = None
-        restored_block, salt_line1, seg_idx_line1 = adapter.restore_control_lines(raw_wire, segment_index=nzb_seg_idx)
+        restored_block, salt_line1, seg_idx_line1 = adapter.restore_control_lines(raw_wire)
         yenc_params, clean_yenc = extract_and_remove_yencryption(restored_block)
+
+        # Bootstrap-only identity: a cached index from a prior decode of this article
+        # must agree with the wire bootstrap; there is no XML-index preference.
+        cached_index = getattr(article, "segment_index", None)
+        if isinstance(cached_index, int) and cached_index != seg_idx_line1:
+            raise ValueError(f"Dual index mismatch: cached segment_index {cached_index} != wire index {seg_idx_line1}")
 
         if yenc_params["salt"] != salt_line1:
             raise ValueError(
@@ -282,9 +295,6 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
             raise ValueError(
                 f"Dual index mismatch between control line 1 ({seg_idx_line1}) and =yencryption ({yenc_params['segment_index']})"
             )
-
-        if nzb_seg_idx is not None and nzb_seg_idx != seg_idx_line1:
-            raise ValueError(f"Dual index mismatch: NZB segment_index {nzb_seg_idx} != wire index {seg_idx_line1}")
 
         art_id = getattr(article, "article", "enc")
         if isinstance(art_id, str):
@@ -319,7 +329,9 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
         article.data_begin = sub_resp.part_begin
         article.data_size = sub_resp.part_size
         article.decoded_size = len(decoded_data)
-        article.crc32 = sub_resp.crc
+        # T4: never persist the ciphertext CRC into any verification path. The wire CRC
+        # covers ciphertext, not plaintext; PAR2 verifies the authenticated plaintext.
+        article.crc32 = None
         nzf.type = "yenc"
 
         if not nzf.filename_checked and (file_name := sub_resp.file_name):
@@ -372,14 +384,15 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
             password = article.password
 
         adapter = _get_decryption_adapter(article, password=password)
-        segment_index = getattr(article, "segment_index", None)
-        wire_index = parsed_enc.get("segment_index")
-        if segment_index is not None and wire_index is not None and segment_index != wire_index:
-            raise ValueError(f"Dual index mismatch: NZB segment_index {segment_index} != wire index {wire_index}")
-        if segment_index is None:
-            segment_index = wire_index
+        # Bootstrap-only identity: the wire =yencryption index field governs. Any cached
+        # article.segment_index from a prior decode attempt of the same article must
+        # agree; there is no XML-index preference anymore.
+        segment_index = parsed_enc.get("segment_index")
+        cached_index = getattr(article, "segment_index", None)
         if segment_index is None:
             raise ValueError(f"Missing explicit segment_index for encrypted article {getattr(article, 'article', '')}")
+        if cached_index is not None and cached_index != segment_index:
+            raise ValueError(f"Dual index mismatch: cached segment_index {cached_index} != wire index {segment_index}")
 
         plaintext = adapter.decrypt_body(
             ciphertext=bytes(decoded_data),
@@ -391,6 +404,8 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
             article.segment_index = segment_index
         decoded_data = bytearray(plaintext)
         article.decoded_size = len(decoded_data)
+        # T4: ciphertext CRC must not flow into any verification path
+        article.crc32 = None
 
     # Only set the name if it was found and not obfuscated. Streamed articles never
     # reach here: a sink is only handed out once the filename has been checked, exactly
@@ -419,7 +434,9 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
         # bytes stay put either way, so par2 has the same chance of repairing it
         raise BadData(decoded_data)
 
-    article.crc32 = crc
+    # T4: on encrypted paths the wire CRC covers ciphertext - never persist it into
+    # any verification path (PAR2, quick-check, whole-file CRC folding)
+    article.crc32 = None if parsed_enc else crc
 
     return decoded_data
 

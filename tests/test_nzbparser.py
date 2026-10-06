@@ -92,26 +92,23 @@ class TestNzbParser:
             nzb_file = _write_nzb_gz(SAB_CACHE_DIR, f"test_{vector_id}", vector["nzb_xml"])
             nzo = NzbObject(f"job_{vector_id}")
 
-            if category == "invalid_identity":
-                nzbparser.nzbfile_parser(nzb_file, nzo)
-                for nzf in nzo.files:
-                    nzf.finish_import()
-                assert nzo.yenc_encrypted is False
-                assert nzo.meta.get("password") == ["test123"]
-                assert all(art.segment_index is None for nzf in nzo.files for art in nzf.decodetable)
-                continue
-
             nzbparser.nzbfile_parser(nzb_file, nzo)
             for nzf in nzo.files:
                 nzf.finish_import()
 
-            if category == "unencrypted_compatibility":
+            # Bootstrap-only identity: NZB segment identity never comes from XML
+            # attributes, so every vector's articles carry segment_index=None here;
+            # the wire Line-1 bootstrap governs at decode time.
+            assert all(art.segment_index is None for nzf in nzo.files for art in nzf.decodetable)
+
+            if category in ("invalid_identity", "unencrypted_compatibility"):
                 assert nzo.yenc_encrypted is False
-                assert all(art.segment_index is None for nzf in nzo.files for art in nzf.decodetable)
                 continue
 
+            # Legacy segmentIndex attributes are ignored per Standard v1.2 (readers
+            # MUST NOT consume them), so even vectors with malformed attributes parse
+            # cleanly whenever the explicit yenc_encrypted meta is present.
             assert nzo.yenc_encrypted is True
-            assert all(art.segment_index is None for nzf in nzo.files for art in nzf.decodetable)
 
     @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
     def test_separate_yenc_and_archive_passwords(self):
@@ -124,16 +121,19 @@ class TestNzbParser:
 </nzb>"""
         encrypted_xml = """<?xml version="1.0" encoding="utf-8"?>
 <nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
- <head><meta type="password">enc_pass</meta></head>
+ <head>
+  <meta type="password">enc_pass</meta>
+  <meta type="yenc_encrypted">true</meta>
+ </head>
  <file poster="p@test.com" date="1600000000" subject="opaque">
-  <segments><segment bytes="1000" number="1" segmentIndex="42">encrypted@test</segment></segments>
+  <segments><segment bytes="1000" number="1">encrypted@test</segment></segments>
  </file>
 </nzb>"""
         explicit_xml = """<?xml version="1.0" encoding="utf-8"?>
 <nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
  <head><meta type="yenc_encrypted">true</meta></head>
  <file poster="p@test.com" date="1600000000" subject="opaque">
-  <segments><segment bytes="1000" number="1" segmentIndex="7">explicit@test</segment></segments>
+  <segments><segment bytes="1000" number="1">explicit@test</segment></segments>
  </file>
 </nzb>"""
 
@@ -149,11 +149,16 @@ class TestNzbParser:
         encrypted_nzo.files[0].finish_import()
         assert encrypted_nzo.meta["password"] == ["enc_pass"]
         assert encrypted_nzo.yenc_encrypted is True
-        assert encrypted_nzo.files[0].decodetable[0].segment_index == 42
+        # Bootstrap-only identity: no XML index consumption; identity comes from the
+        # wire Line-1 bootstrap at decode time, so it is absent at ingest.
+        assert encrypted_nzo.files[0].decodetable[0].segment_index is None
+
+        # Explicit yenc_encrypted without password meta is a structural error at ingest
+        from sabnzbd.encryption import YEncEncryptionStructuralError
 
         explicit_nzo = NzbObject("explicit")
-        nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, "explicit", explicit_xml), explicit_nzo)
-        assert explicit_nzo.yenc_encrypted is True
+        with pytest.raises(YEncEncryptionStructuralError, match="MISSING_PASSWORD"):
+            nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, "explicit", explicit_xml), explicit_nzo)
 
     @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
     def test_password_redacted_from_parser_logs(self, caplog):

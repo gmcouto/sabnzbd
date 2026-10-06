@@ -33,6 +33,17 @@ import nacl.bindings as nb
 BOOTSTRAP_PREFIX_LEN = 20
 
 
+class YEncEncryptionStructuralError(ValueError):
+    """Structural yEnc-encryption metadata failure (missing/empty password, unsupported mode).
+
+    Per the tier separation in the yEnc encryption standards: structural failures abort the
+    job and are NEVER retried against another server - no plaintext or ciphertext is released.
+    Inherits from ValueError so existing ``isinstance(e, ValueError)`` handlers still catch it,
+    but decoder.py catches this class FIRST to route it to the job-terminal path instead of the
+    retryable provider-failover tier (METADATA_VALIDATION semantics).
+    """
+
+
 def byte_to_numeral(b: int) -> int:
     """Map byte octet to numeral 0..252 per yEnc Control Lines Standard v1.0."""
     if 0x01 <= b <= 0x09:
@@ -321,6 +332,9 @@ def extract_bootstrap_from_line1(line1: bytes) -> tuple[bytes, int]:
     segment_index = int.from_bytes(line1[16:20], "big")
     if segment_index == 0:
         raise ValueError("ZERO_SEGMENT_INDEX: segment index cannot be zero")
+    if any(b in (0x0A, 0x0D) for b in line1[16:20]):
+        # CR-02: a 0x0A/0x0D inside the index bytes splits Line 1 on the wire
+        raise ValueError("FORBIDDEN_SEGMENT_INDEX_BYTE: segment index bytes contain 0x0A or 0x0D")
     return salt, segment_index
 
 
@@ -395,7 +409,7 @@ class DecryptionAdapter:
             if salt in self._key_cache:
                 return self._key_cache[salt]
         if not self.password:
-            raise ValueError("Password required for decryption but none provided")
+            raise YEncEncryptionStructuralError("MISSING_PASSWORD: no password supplied for yEnc-encrypted article")
         with self._lock:
             if salt in self._key_cache:
                 return self._key_cache[salt]
@@ -453,9 +467,13 @@ class DecryptionAdapter:
         return ff1_decrypt(enc_key, tweak, ciphertext, radix)
 
     def restore_control_lines(self, yenc_block: bytes, segment_index: Optional[int] = None) -> tuple[bytes, bytes, int]:
-        """Restore encrypted control lines in a yEnc article block per Standard v1.1.
+        """Restore encrypted control lines in a yEnc article block per Standard v1.2.
 
         Returns (restored_yenc_block, salt, segment_index).
+
+        N (the footer lineIndex) is the 1-based line index of the =yend line. Trailing
+        blank lines after the footer are outside the yEnc block and excluded from
+        lineIndex accounting; they are preserved as-is after the restored footer.
         """
         raw_lines = split_lines_preserving_endings(yenc_block)
         if not raw_lines:

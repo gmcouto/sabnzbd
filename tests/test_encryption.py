@@ -636,11 +636,14 @@ class TestDirectWriteGatingAndFailover:
             "cipher": "XChaCha20-Poly1305",
             "salt": salt,
             "tag": tag,
+            "segment_index": vec["segment_index"],
         }
 
         res = decoder.decode_yenc(article, resp)
         assert res == bytearray(expected_pt), "Expected decoded data to be authenticated plaintext"
         assert article.decoded_size == len(expected_pt)
+        # T4: ciphertext CRC must not flow into verification paths
+        assert article.crc32 is None
 
     def test_wire_restore_and_authenticated_decode(self):
         """Full wire response: encrypted control lines + =yencryption + ciphertext body -> authenticated decode."""
@@ -703,7 +706,8 @@ class TestDirectWriteGatingAndFailover:
         assert decoded == bytearray(plaintext)
         assert article.decoded_size == len(plaintext)
         assert article.file_size == len(ct)
-        assert article.crc32 == body_crc
+        # T4: ciphertext CRC never persisted on encrypted paths
+        assert article.crc32 is None
         assert article.nzf.nzo.verify_nzf_filename.called
 
         # 2. Multipart article test
@@ -747,7 +751,8 @@ class TestDirectWriteGatingAndFailover:
         assert article_m.file_size == len(ct) * 2
         assert article_m.data_begin == 0
         assert article_m.data_size == len(ct)
-        assert article_m.crc32 == body_crc
+        # T4: ciphertext CRC never persisted on encrypted paths
+        assert article_m.crc32 is None
 
         # 3. Wire CRC failure (corrupted pcrc32 in =yend)
         bad_crc = (body_crc ^ 0xFFFFFFFF) & 0xFFFFFFFF
@@ -1293,7 +1298,7 @@ class TestCycle1AdversarialRemediation:
             "segment_index": 2,  # Wire mismatch: 2 != 1
         }
 
-        with pytest.raises(ValueError, match="Dual index mismatch: NZB segment_index 1 != wire index 2"):
+        with pytest.raises(ValueError, match="Dual index mismatch: cached segment_index 1 != wire index 2"):
             decoder.decode_yenc(article, response)
 
     def test_c1_07_bad_data_zero_output_guarantee(self):
@@ -1470,9 +1475,9 @@ class TestCycle1AdversarialRemediation:
         ct1 = adapter.encrypt_control_line(b"=ybegin line=128 size=0 name=test.bin", k1, t1)
         wire_line1 = salt + wire_seg_idx.to_bytes(4, "big") + ct1
         ct2 = adapter.encrypt_control_line(
-            b"=yencryption cipher=XChaCha20-Poly1305 index=00000002 salt="
+            b"=yencryption cipher=XChaCha20-Poly1305 salt="
             + salt.hex().encode("ascii")
-            + b" tag="
+            + b" index=00000002 tag="
             + (b"00" * 16),
             k2,
             t2,
