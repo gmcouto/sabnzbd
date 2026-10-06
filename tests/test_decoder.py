@@ -279,8 +279,9 @@ class TestEncryptionPhase58:
 
         response = self._make_encrypted_response(b"\x01" * 16, b"\x02" * 16, 1)
 
-        with mock.patch("sabnzbd.encryption.DecryptionAdapter") as mock_adapter_cls, mock.patch(
-            "sabnzbd.decoder._get_decryption_adapter", return_value=mock_adapter_cls.return_value
+        with (
+            mock.patch("sabnzbd.encryption.DecryptionAdapter") as mock_adapter_cls,
+            mock.patch("sabnzbd.decoder._get_decryption_adapter", return_value=mock_adapter_cls.return_value),
         ):
             mock_adapter_cls.return_value.decrypt_body.return_value = b"plaintext"
             decoded = decoder.decode_yenc(article, response)

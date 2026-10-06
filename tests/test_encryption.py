@@ -1688,7 +1688,12 @@ class TestDotUnstuffing:
         resp = mock.MagicMock(spec=sabctools.NNTPResponse)
         resp.sink_failed = False
         resp.bytes_decoded = 0
-        resp.lines = [stuffed_wire1.decode("latin-1"), wire2.decode("latin-1"), body_encoded.decode("latin-1"), wire4.decode("latin-1")]
+        resp.lines = [
+            stuffed_wire1.decode("latin-1"),
+            wire2.decode("latin-1"),
+            body_encoded.decode("latin-1"),
+            wire4.decode("latin-1"),
+        ]
 
         decoded = decoder.decode_yenc(article, resp)
         assert decoded == bytearray(plaintext), "dot-stuffed Line 1 must decode to exact plaintext"
