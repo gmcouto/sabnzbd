@@ -204,20 +204,31 @@ def ff1_decrypt(key: bytes, tweak: bytes, ciphertext_bytes: bytes, radix: int = 
 
 
 def parse_yencryption_line(line: str | bytes) -> Optional[dict[str, Any]]:
-    """Parse standard =yencryption control line per v1.1 Self-Describing Article Bootstrap Standard.
+    """Parse standard =yencryption control line per Body Encryption Standard v1.2.
 
     Format: =yencryption cipher=XChaCha20-Poly1305 salt=<32_hex_chars> index=<8_hex_chars> tag=<32_hex_chars>
-    Enforces strict token count (5), exact token order, exact lowercase hex, and exact lengths.
+    Enforces strict grammar: exactly 4 single-SP separators (no leading/trailing whitespace,
+    no tabs, no double spaces), exact total length 128, exact token order, exact lowercase
+    hex, and exact field lengths. Grammar violations raise ValueError (mapped by callers to
+    the retryable PROVIDER_FAILOVER tier).
     """
     if isinstance(line, bytes):
         line = line.decode("ascii", errors="replace")
-    line = line.strip()
+    # Strip transport line terminators only (\r\n, \n, \r) - grammar whitespace itself stays strict
+    line = line.rstrip("\r\n")
     if not line.startswith("=yencryption"):
         return None
 
-    tokens = line.split()
-    if len(tokens) != 5:
+    # Strict single-SP grammar: any tab or repeated space is a grammar violation
+    # (INVALID_WHITESPACE -> PROVIDER_FAILOVER). Token-count/content violations keep the
+    # existing None/typed-error semantics.
+    strict_tokens = line.split(" ")
+    normalized_tokens = line.split()
+    if len(strict_tokens) != len(normalized_tokens) or any(token == "" for token in strict_tokens):
+        raise ValueError("INVALID_WHITESPACE: =yencryption requires exactly 4 single-SP separators")
+    if len(normalized_tokens) != 5:
         return None
+    tokens = normalized_tokens
     if tokens[0] != "=yencryption":
         return None
     if tokens[1] != "cipher=XChaCha20-Poly1305":
@@ -228,6 +239,10 @@ def parse_yencryption_line(line: str | bytes) -> Optional[dict[str, Any]]:
         return None
     if not tokens[4].startswith("tag="):
         return None
+
+    # Exact 128-byte total length assertion (Body Std v1.2 grammar)
+    if len(line) != 128:
+        raise ValueError(f"INVALID_LENGTH: =yencryption line must be exactly 128 characters, got {len(line)}")
 
     salt_hex = tokens[2][len("salt=") :]
     index_hex = tokens[3][len("index=") :]

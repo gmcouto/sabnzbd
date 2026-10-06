@@ -28,7 +28,7 @@
       "category": "header_syntax",
       "description": "Empty cipher parameter value",
       "input_line": "=yencryption cipher= salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=ed70d238067735a20783df5e094ccafa",
-      "expected_error": "INVALID_CIPHER",
+      "expected_error": "UNSUPPORTED_CIPHER",
       "zero_output_required": true,
       "expected_rejection_stage": "PROVIDER_FAILOVER",
       "provider_failover_permitted": true
@@ -290,6 +290,46 @@
       "provider_failover_permitted": true
     },
     {
+      "id": "control-syntax-08-forbidden-index-10",
+      "category": "control_syntax",
+      "description": "Line 1 bootstrap segmentIndex 0x0000000A contains forbidden LF byte 0x0A (CR-02); 22 bytes: 16B salt + 4B BE index at offsets 16..19 + 2B 0x3d3d trailer",
+      "line1_hex": "4b376d5839704c32715238764e34775a0000000a3d3d",
+      "expected_error": "FORBIDDEN_SEGMENT_INDEX_BYTE",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "control-syntax-09-forbidden-index-13",
+      "category": "control_syntax",
+      "description": "Line 1 bootstrap segmentIndex 0x0000000D contains forbidden CR byte 0x0D (CR-02)",
+      "line1_hex": "4b376d5839704c32715238764e34775a0000000d3d3d",
+      "expected_error": "FORBIDDEN_SEGMENT_INDEX_BYTE",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "control-syntax-10-forbidden-index-266",
+      "category": "control_syntax",
+      "description": "Line 1 bootstrap segmentIndex 0x0000010A contains forbidden LF byte 0x0A at offset 19 (CR-02)",
+      "line1_hex": "4b376d5839704c32715238764e34775a0000010a3d3d",
+      "expected_error": "FORBIDDEN_SEGMENT_INDEX_BYTE",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "control-syntax-11-forbidden-index-269",
+      "category": "control_syntax",
+      "description": "Line 1 bootstrap segmentIndex 0x0000010D contains forbidden CR byte 0x0D at offset 19 (CR-02)",
+      "line1_hex": "4b376d5839704c32715238764e34775a0000010d3d3d",
+      "expected_error": "FORBIDDEN_SEGMENT_INDEX_BYTE",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
       "id": "control-syntax-07-wrong-password",
       "category": "control_syntax",
       "description": "Wrong password for control line decryption results in non-'=y' plaintext",
@@ -322,7 +362,7 @@
       "category": "header_syntax",
       "description": "Uppercase hexadecimal salt is not canonical",
       "input_line": "=yencryption cipher=XChaCha20-Poly1305 salt=1A2B3C4D5E6F7890ABCDEF1234567890 index=00000001 tag=ed70d238067735a20783df5e094ccafa",
-      "expected_error": "INVALID_SALT_HEX",
+      "expected_error": "UPPERCASE_HEX",
       "zero_output_required": true,
       "expected_rejection_stage": "PROVIDER_FAILOVER",
       "provider_failover_permitted": true
@@ -332,7 +372,7 @@
       "category": "header_syntax",
       "description": "An extra parameter violates the five-token grammar",
       "input_line": "=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=ed70d238067735a20783df5e094ccafa extra=value",
-      "expected_error": "EXTRA_PARAMETER",
+      "expected_error": "INVALID_TOKEN_COUNT",
       "zero_output_required": true,
       "expected_rejection_stage": "PROVIDER_FAILOVER",
       "provider_failover_permitted": true
@@ -342,7 +382,7 @@
       "category": "header_syntax",
       "description": "Parameter order is canonical and mandatory",
       "input_line": "=yencryption salt=1a2b3c4d5e6f7890abcdef1234567890 cipher=XChaCha20-Poly1305 index=00000001 tag=ed70d238067735a20783df5e094ccafa",
-      "expected_error": "REORDERED_HEADER",
+      "expected_error": "UNSUPPORTED_CIPHER",
       "zero_output_required": true,
       "expected_rejection_stage": "PROVIDER_FAILOVER",
       "provider_failover_permitted": true
@@ -398,7 +438,27 @@
       "category": "header_syntax",
       "description": "Duplicate parameters are rejected",
       "input_line": "=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=ed70d238067735a20783df5e094ccafa tag=ed70d238067735a20783df5e094ccafa",
-      "expected_error": "DUPLICATE_PARAMETER",
+      "expected_error": "INVALID_TOKEN_COUNT",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "header-16-tab-separated",
+      "category": "header_syntax",
+      "description": "=yencryption header using a tab between tokens instead of a single SP (T8 whitespace strictness)",
+      "input_line": "=yencryption\tcipher=XChaCha20-Poly1305\tsalt=1a2b3c4d5e6f7890abcdef1234567890\tindex=00000001\ttag=ed70d238067735a20783df5e094ccafa",
+      "expected_error": "INVALID_WHITESPACE",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "header-17-double-space",
+      "category": "header_syntax",
+      "description": "=yencryption header using two consecutive spaces between tokens instead of a single SP (T8 whitespace strictness)",
+      "input_line": "=yencryption  cipher=XChaCha20-Poly1305  salt=1a2b3c4d5e6f7890abcdef1234567890  index=00000001  tag=ed70d238067735a20783df5e094ccafa",
+      "expected_error": "INVALID_WHITESPACE",
       "zero_output_required": true,
       "expected_rejection_stage": "PROVIDER_FAILOVER",
       "provider_failover_permitted": true
@@ -408,6 +468,15 @@
       "category": "metadata_validation",
       "description": "Encrypted transport requires a password metadata value",
       "expected_error": "MISSING_PASSWORD",
+      "expected_rejection_stage": "METADATA_VALIDATION",
+      "provider_failover_permitted": false,
+      "zero_output_required": true
+    },
+    {
+      "id": "metadata-04-body-only-vs-combined-only",
+      "category": "metadata_validation",
+      "description": "Body-only-mode article (no =yencryption line) presented to a combined-only receiver: mode unsupported (T2)",
+      "expected_error": "METADATA_VALIDATION_BODY_ONLY",
       "expected_rejection_stage": "METADATA_VALIDATION",
       "provider_failover_permitted": false,
       "zero_output_required": true

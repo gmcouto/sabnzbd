@@ -274,6 +274,16 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
         from sabnzbd.encryption import extract_and_remove_yencryption
 
         lines = [line.encode("latin-1") if isinstance(line, str) else line for line in response.lines]
+
+        # Dot-unstuffing adapter (RFC 3977 §3.1.1 transport boundary). On the encrypted
+        # path sabctools cannot recognize yEnc (the =ybegin line is FF1-encrypted), so
+        # response.lines carry RAW presentation bytes with '..' intact - unlike the data
+        # path, where sabctools unstuffs during yEnc decoding. Producers MUST dot-stuff
+        # (a Line 1 salt byte can legitimately be 0x2E); consumers MUST unstuff before
+        # line splitting/bootstrap extraction: '..' maps to content '.', and a lone
+        # single '.' is the article terminator (already consumed by sabctools here).
+        lines = [line[1:] if line.startswith(b"..") else line for line in lines]
+
         raw_wire = b"\r\n".join(lines) + b"\r\n"
 
         adapter = _get_decryption_adapter(article, password=password)

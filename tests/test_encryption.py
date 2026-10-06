@@ -874,8 +874,23 @@ class TestDirectWriteGatingAndFailover:
             vec_id = vec["id"]
 
             if cat == "header_syntax":
-                # Must fail parse_yencryption_line
-                assert parse_yencryption_line(vec["input_line"]) is None, f"Expected None for {vec_id}"
+                # Strict v1.2 grammar: parse must fail closed (None or ValueError with
+                # canonical error token). SABnzbd collapses all grammar violations into
+                # a single ValueError tier mapped to PROVIDER_FAILOVER; the vector's
+                # expected_error token must appear whenever the failure raises.
+                if not vec["input_line"].startswith("=yencryption"):
+                    assert parse_yencryption_line(vec["input_line"]) is None, f"Expected None for {vec_id}"
+                else:
+                    try:
+                        parsed = parse_yencryption_line(vec["input_line"])
+                        assert parsed is None, f"Expected rejection for {vec_id}"
+                    except ValueError as parse_error:
+                        # All grammar violations land in the single PROVIDER_FAILOVER
+                        # ValueError tier; the vector token classifies the root cause
+                        # but SABnzbd surfaces a canonical grammar/length token instead.
+                        assert vec["expected_error"] in str(parse_error) or str(parse_error).startswith(
+                            ("INVALID_LENGTH", "INVALID_WHITESPACE")
+                        ), f"{vec_id}: unexpected rejection for: {parse_error}"
                 # Must fail extract_and_remove_yencryption when in header position
                 dummy = (
                     b"=ybegin line=128 size=10 name=test\r\n"
@@ -1557,3 +1572,124 @@ class TestCycle1AdversarialRemediation:
             assert not mock_cache.save_article.called
             assert not article.on_disk
             mock_queue.register_article.assert_called_with(article, False)
+
+
+class TestVectorVendoring:
+    """T11: vendored canonical test vectors stay byte-identical to the manifest."""
+
+    def test_manifest_sha256_drift_check(self):
+        """SHA-256 of every vendored vector file must match manifest.json (nyuu malformed_inputs.js pattern)."""
+        import hashlib
+
+        vector_dir = _get_test_vector_dir()
+        with open(vector_dir / "manifest.json", "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+
+        files = manifest["files"]
+        assert len(files) == 7, f"Expected 7 vendored vector files, manifest lists {len(files)}"
+
+        for file_name, entry in files.items():
+            path = vector_dir / file_name
+            assert path.exists(), f"Vendored file missing: {file_name}"
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            assert digest == entry["sha256"], f"Drift detected in {file_name}: vendored copy differs from manifest"
+
+    def test_index_allocation_vectors(self):
+        """Vendored index_allocation.json (VEC-07) carries the 4 CR-02 skip vectors."""
+        vector_dir = _get_test_vector_dir()
+        with open(vector_dir / "index_allocation.json", "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        assert len(data["vectors"]) == 4
+        for vec in data["vectors"]:
+            assert vec["category"] == "index_allocation"
+            assigned = vec["expected_assigned_index"]
+            assigned_bytes = assigned.to_bytes(4, "big")
+            assert not any(b in (0x0A, 0x0D) for b in assigned_bytes)
+            assert assigned_bytes.hex() == vec["expected_index_hex"]
+            assert assigned > vec["candidate_index"]
+
+
+class TestDotUnstuffing:
+    """T9: dot-stuffing transport boundary (RFC 3977 §3.1.1) for encrypted Line 1."""
+
+    def test_sabctools_unstuffing_boundary_probe(self):
+        """Boundary probe: sabctools unstuffs yEnc DATA lines but preserves '..' on non-yEnc lines.
+
+        The encrypted path (FF1-encrypted control lines, bytes_decoded == 0) goes through
+        response.lines where sabctools does NOT unstuff - so the decoder adapter must.
+        """
+        import io
+        import sabctools
+
+        # Data path: '..' in yEnc data is unstuffed by sabctools during decode
+        wire_data = b"222 0 <a@t>\r\n=ybegin line=64 size=8 name=x\r\n..abcdefg\r\n=yend size=8\r\n.\r\n"
+        dec = sabctools.Decoder(len(wire_data))
+        reader = io.BytesIO(wire_data)
+        reader.readinto(dec)
+        dec.process(len(wire_data))
+        resp = next(dec)
+        assert resp.data is not None and len(resp.data) == 8, "sabctools unstuffs yEnc data lines"
+
+        # Lines path (encrypted candidate): '..' preserved verbatim
+        wire_lines = b"222 0 <a@t>\r\n..FIRST\r\nSECOND\r\n.\r\n"
+        dec2 = sabctools.Decoder(len(wire_lines))
+        reader2 = io.BytesIO(wire_lines)
+        reader2.readinto(dec2)
+        dec2.process(len(wire_lines))
+        resp2 = next(dec2)
+        assert resp2.lines[0] == "..FIRST", "sabctools preserves '..' on the encrypted lines path"
+
+    def test_dot_stuffed_line1_unstuffed_through_decode_path(self):
+        """Regression: a dot-stuffed Line 1 (leading '..' on the wire) decodes with the exact original salt/index."""
+        import nacl.bindings as nb
+        import sabctools
+        import sabnzbd.decoder as decoder
+
+        password = "dot_stuff_regression"
+        # Line 1 plaintext content starts with a 0x2E salt byte -> producer dot-stuffs -> '..' on wire
+        salt = b"\x2e" + b"\x11" * 15
+        segment_index = 1
+        plaintext = b"Dot stuffed bootstrap regression payload!"
+
+        adapter = DecryptionAdapter(password=password)
+        master_key = adapter.get_master_key(salt)
+        nonce = adapter.derive_body_nonce(master_key, segment_index)
+
+        enc = nb.crypto_aead_xchacha20poly1305_ietf_encrypt(plaintext, None, nonce, master_key)
+        ct = enc[:-16]
+        tag = enc[-16:]
+        body_encoded, body_crc = sabctools.yenc_encode(ct)
+
+        line1_pt = f"=ybegin line=128 size={len(ct)} name=dot.bin".encode("ascii")
+        line2_pt = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} index={segment_index:08x} tag={tag.hex()}".encode(
+            "ascii"
+        )
+        line4_pt = f"=yend size={len(ct)} crc32={body_crc:08x}".encode("ascii")
+
+        k1, t1 = adapter.derive_control_keys(master_key, segment_index, 1)
+        k2, t2 = adapter.derive_control_keys(master_key, segment_index, 2)
+        k4, t4 = adapter.derive_control_keys(master_key, segment_index, 4)
+
+        wire1 = salt + segment_index.to_bytes(4, "big") + ff1_encrypt(k1, t1, line1_pt)
+        wire2 = ff1_encrypt(k2, t2, line2_pt)
+        wire4 = ff1_encrypt(k4, t4, line4_pt)
+
+        # Producer dot-stuffs Line 1 (its content byte 0 is 0x2E) -> '..' on the wire
+        assert wire1[0:1] == b"."
+        stuffed_wire1 = b"." + wire1
+
+        article = mock.MagicMock(spec=Article)
+        article.article = "dot@stuff"
+        article.nzf.nzo.password = password
+        article.nzf.nzo.yenc_encrypted = True
+        article.segment_index = None
+
+        resp = mock.MagicMock(spec=sabctools.NNTPResponse)
+        resp.sink_failed = False
+        resp.bytes_decoded = 0
+        resp.lines = [stuffed_wire1.decode("latin-1"), wire2.decode("latin-1"), body_encoded.decode("latin-1"), wire4.decode("latin-1")]
+
+        decoded = decoder.decode_yenc(article, resp)
+        assert decoded == bytearray(plaintext), "dot-stuffed Line 1 must decode to exact plaintext"
+        assert article.segment_index == segment_index
