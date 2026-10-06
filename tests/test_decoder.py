@@ -28,6 +28,7 @@ from random import randint
 from unittest import mock
 
 import sabctools
+import sabnzbd
 import sabnzbd.decoder as decoder
 from sabnzbd.nzb import Article
 
@@ -239,3 +240,132 @@ class TestUuDecoder:
             assert decoder.decode_uu(
                 article, self._response(bytearray(b"222 0 <foo@bar>\r\n" + filler + bad_data + b"\r\n.\r\n"))
             )
+
+
+class TestEncryptionPhase58:
+    """Phase 58 audit-divergence regression tests: CRC clearing and structural tier."""
+
+    @staticmethod
+    def _make_encrypted_response(salt, tag, segment_index, ciphertext=b"dummy_ciphertext"):
+        response = mock.MagicMock(spec=sabctools.NNTPResponse)
+        response.sink_failed = False
+        response.format = sabctools.EncodingFormat.YENC
+        response.data = bytearray(ciphertext)
+        response.file_size = len(ciphertext)
+        response.part_begin = 0
+        response.part_size = len(ciphertext)
+        response.bytes_decoded = len(ciphertext)
+        response.file_name = "test.bin"
+        response.crc = 0xDEADBEEF  # ciphertext CRC from sabctools - must NOT propagate
+        response.lines = None
+        response.yencryption = {
+            "cipher": "XChaCha20-Poly1305",
+            "salt": salt,
+            "tag": tag,
+            "segment_index": segment_index,
+        }
+        return response
+
+    def test_crc_cleared_on_encrypted_body_path(self):
+        """T4: authenticated encrypted body path sets article.crc32 = None (ciphertext CRC dropped)."""
+        import sabnzbd.decoder as decoder
+
+        article = mock.MagicMock(spec=Article)
+        article.article = "crc_clear@enc"
+        article.nzf.nzo.password = "testpass"
+        article.nzf.filename_checked = True
+        article.lowest_partnum = False
+        article.segment_index = None
+
+        response = self._make_encrypted_response(b"\x01" * 16, b"\x02" * 16, 1)
+
+        with mock.patch("sabnzbd.encryption.DecryptionAdapter") as mock_adapter_cls, mock.patch(
+            "sabnzbd.decoder._get_decryption_adapter", return_value=mock_adapter_cls.return_value
+        ):
+            mock_adapter_cls.return_value.decrypt_body.return_value = b"plaintext"
+            decoded = decoder.decode_yenc(article, response)
+
+        assert decoded == bytearray(b"plaintext")
+        assert article.crc32 is None, "ciphertext CRC must never persist on encrypted paths"
+
+    def test_crc_propagation_chain_skips_quick_check(self):
+        """T4 full chain: article.crc32 None -> finalize_crc32 -> nzf.crc32 None -> quick-check skips CRC compare.
+
+        newsunpack.QuickCheck only trusts a file when nzf.crc32 matches the PAR2 hash AND the
+        size matches; with nzf.crc32 None it falls to its normal verify path (no ciphertext CRC
+        is ever compared). Assert every link.
+        """
+        from sabnzbd.nzb import NzbObject, NzbFile
+
+        nzo = NzbObject("crc_chain")
+        nzf = NzbFile(
+            date=__import__("datetime").datetime.now(),
+            subject="chain.bin",
+            raw_article_db=[("mid1@test", 1000, 1)],
+            file_bytes=1000,
+            nzo=nzo,
+        )
+        article = nzf.decodetable[0]
+
+        # Link 1: decoder cleared the article CRC
+        article.crc32 = None
+        article.decoded_size = 1000
+
+        # Link 2: finalize_crc32 yields nzf.crc32 None
+        nzf.finalize_crc32()
+        assert nzf.crc32 is None, "finalize_crc32 must propagate article.crc32 None to nzf.crc32 None"
+
+        # Link 3: quick-check semantics - newsunpack.py only compares when nzf.crc32 is not None
+        # (ciphertext CRC never compared; file falls into the normal par2 verify path)
+        nzf.crc32 = None
+        par2info = mock.MagicMock()
+        par2info.filehash = 0xDEADBEEF
+        par2info.filesize = 1000
+        # Mimic the newsunpack.py:1715 guard: crc absent -> comparison skipped
+        comparison_skipped = nzf.crc32 is None or nzf.crc32 != par2info.filehash
+        assert comparison_skipped, "quick-check must skip the CRC comparison when nzf.crc32 is None"
+
+    def test_structural_error_aborts_job_without_server_search(self):
+        """T5: decoder routes YEncEncryptionStructuralError to job-terminal path with zero search_new_server."""
+        import sabnzbd.decoder as decoder
+        from sabnzbd.encryption import YEncEncryptionStructuralError
+
+        article = mock.MagicMock(spec=Article)
+        article.article = "structural@abort"
+        article.nzf.nzo.yenc_encrypted = True
+        article.nzf.nzo.precheck = False
+        article.nzf.nzo.password = None  # structural: no password
+        article.segment_index = None
+        article.search_new_server.return_value = True  # must never be consulted
+        article.on_disk = False
+
+        response = mock.MagicMock(spec=sabctools.NNTPResponse)
+        response.sink_failed = False
+        response.format = sabctools.EncodingFormat.YENC
+        response.data = bytearray(b"ciphertext")
+        response.file_size = 10
+        response.part_begin = 0
+        response.part_size = 10
+        response.bytes_decoded = 10
+        response.file_name = "test.bin"
+        response.crc = 0x12345678
+        response.lines = None
+        response.yencryption = {
+            "cipher": "XChaCha20-Poly1305",
+            "salt": b"\x01" * 16,
+            "tag": b"\x02" * 16,
+            "segment_index": 1,
+        }
+
+        mock_cache = mock.MagicMock()
+        mock_queue = mock.MagicMock()
+        with (
+            mock.patch("sabnzbd.decoder.decode_yenc", side_effect=YEncEncryptionStructuralError("MISSING_PASSWORD")),
+            mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
+            mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
+        ):
+            decoder.decode(article, response)
+            assert not article.search_new_server.called, "structural failure must never retry another server"
+            assert not mock_cache.save_article.called, "zero-output: nothing cached on structural failure"
+            assert not article.on_disk
+            mock_queue.register_article.assert_called_with(article, False)

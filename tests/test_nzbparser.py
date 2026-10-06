@@ -188,3 +188,33 @@ class TestNzbParser:
         # The password metadata must still be present in nzo.meta for downstream consumption
         assert nzo.meta.get("password") == [secret_sentinel]
         assert nzo.meta.get("category") == ["movies"]
+
+
+@pytest.mark.config({"download_dir": SAB_CACHE_DIR})
+def test_index_allocation_conformance():
+    """Dedicated loader/dispatch for the vendored index_allocation.json (VEC-07, CR-02).
+
+    These vectors describe uploader-side index allocation and are NOT NZB-shaped, so they
+    are asserted directly on allocation schema rather than routed through nzbfile_parser.
+    """
+    vectors_path = os.path.join(os.path.dirname(__file__), "data/test-vectors/index_allocation.json")
+    with open(vectors_path, encoding="utf-8") as vectors_file:
+        vectors = json.load(vectors_file)["vectors"]
+
+    assert len(vectors) == 4
+
+    for vec in vectors:
+        assert vec["category"] == "index_allocation"
+        candidate = vec["candidate_index"]
+        assigned = vec["expected_assigned_index"]
+
+        if vec["expected_error"] is None:
+            # Candidate forbidden (uint32_be contains 0x0A/0x0D) or itself forbidden:
+            # assigned index must be safe and strictly greater than the candidate
+            candidate_bytes = candidate.to_bytes(4, "big")
+            forbidden = any(b in (0x0A, 0x0D) for b in candidate_bytes)
+            if forbidden:
+                assert assigned > candidate
+            assigned_bytes = assigned.to_bytes(4, "big")
+            assert not any(b in (0x0A, 0x0D) for b in assigned_bytes), "assigned index must be CR-02-safe"
+            assert assigned_bytes.hex() == vec["expected_index_hex"]

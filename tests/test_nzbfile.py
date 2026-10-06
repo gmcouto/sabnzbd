@@ -159,7 +159,11 @@ class TestNzbFile:
         assert restored_nzf.segment_index_base is None
 
     def test_pickle_round_trip_preserves_identity_and_rebounds_locks(self):
-        """New pickle/admin round trips retain file ordinal, declared part, base, and segmentIndex."""
+        """Pickle/admin round trips retain file ordinal, declared part, base, and article segment cache.
+
+        segment_index is a post-decode cache populated from the wire Line-1 bootstrap; it is
+        never derived from NZB XML anymore, but the field and its persistence stay.
+        """
         nzo = NzbObject("test_pickle")
         nzf = NzbFile(
             date=datetime.now(),
@@ -169,10 +173,9 @@ class TestNzbFile:
             nzo=nzo,
             file_ordinal=2,
             total_files=5,
-            segment_index_base=10,
         )
-        art = nzf.add_article(("art1@test", 1000, 1, 10))
-        art2 = nzf.add_article(("art2@test", 1000, 2, 11))
+        art = nzf.add_article(("art1@test", 1000, 1))
+        art2 = nzf.add_article(("art2@test", 1000, 2))
         # simulate art2 completed and removed from articles dict but still in decodetable
         nzf.remove_article(art2, success=True)
 
@@ -181,39 +184,45 @@ class TestNzbFile:
         art_restored: Article = pickle.loads(art_pickled)
         assert art_restored.article == "art1@test"
         assert art_restored.part_number == 1
-        assert art_restored.segment_index == 10
+        assert art_restored.segment_index is None
+
+        # Post-decode cache field survives pickle when populated (bootstrap cache write path)
+        art.segment_index = 10
+        art_recached: Article = pickle.loads(pickle.dumps(art))
+        assert art_recached.segment_index == 10
 
         # NzbFile round trip
         nzf_pickled = pickle.dumps(nzf)
         nzf_restored: NzbFile = pickle.loads(nzf_pickled)
         assert nzf_restored.file_ordinal == 2
         assert nzf_restored.total_files == 5
-        assert nzf_restored.segment_index_base == 10
         assert len(nzf_restored.decodetable) == 2
         assert nzf_restored.decodetable[0].part_number == 1
-        assert nzf_restored.decodetable[0].segment_index == 10
         assert nzf_restored.decodetable[1].part_number == 2
-        assert nzf_restored.decodetable[1].segment_index == 11
 
         # Check lock rebinding on all articles
         for article in nzf_restored.decodetable:
             assert article.lock == nzf_restored.lock
 
     def test_lazy_tuples_and_pickle_persistence(self):
-        """4-tuples (mid, size, part, segment_index) survive disk save_data, load_data, and pickle round trips."""
+        """3-tuples (mid, size, part) survive disk save_data, load_data, and pickle round trips.
+
+        Bootstrap-only identity (Standard v1.2): NZB tuples never carry a segment index;
+        article.segment_index stays as a post-decode cache field only.
+        """
         nzo = NzbObject("test_pickle_identity")
         nzo.yenc_encrypted = True
         nzf = NzbFile(
             date=datetime.now(),
             subject="test.bin",
             raw_article_db=[
-                ("mid1@test", 1000, 1, 42),
-                ("mid2@test", 1000, 2, 43),
+                ("mid1@test", 1000, 1),
+                ("mid2@test", 1000, 2),
             ],
             file_bytes=2000,
             nzo=nzo,
         )
-        assert nzf.decodetable[0].segment_index == 42
+        assert nzf.decodetable[0].segment_index is None
         assert nzf.decodetable[0].part_number == 1
         assert not nzf.import_finished
 
@@ -221,14 +230,14 @@ class TestNzbFile:
         nzf.finish_import()
         assert nzf.import_finished
         assert len(nzf.decodetable) == 2
-        assert nzf.decodetable[1].segment_index == 43
+        assert nzf.decodetable[1].segment_index is None
         assert nzf.decodetable[1].part_number == 2
 
         # Round trip Article
         art_restored: Article = pickle.loads(pickle.dumps(nzf.decodetable[0]))
         assert art_restored.article == "mid1@test"
         assert art_restored.part_number == 1
-        assert art_restored.segment_index == 42
+        assert art_restored.segment_index is None
 
         # Round trip NzbObject
         nzo_restored: NzbObject = pickle.loads(pickle.dumps(nzo))
