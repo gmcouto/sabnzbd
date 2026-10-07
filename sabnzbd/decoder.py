@@ -417,6 +417,19 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
         # T4: ciphertext CRC must not flow into any verification path
         article.crc32 = None
 
+    # CR-01 / Zero-Output Rule (third enforcement site of the single shared rule, alongside
+    # pesto adapter.rs and nzbget ArticleDownloader.cpp): a release declared yEnc-encrypted
+    # must never accept a plain (never-authenticated) article. A substituted article is
+    # provider corruption - retriable tier per Control Std v1.2 §5 step 4b - so this raises
+    # plain ValueError, which decode() routes to search_new_server. Never a structural error,
+    # and never inside the if yenc_info: branch (the hole is precisely yenc_info is None).
+    # Gate strictly on _is_yenc_encrypted (declared-encrypted provenance), never on the
+    # archive-extraction password.
+    if not parsed_enc and _is_yenc_encrypted(article):
+        raise ValueError(
+            f"UNAUTHENTICATED_ARTICLE: plain yEnc article {getattr(article, 'article', '')} in a yEnc-encrypted release"
+        )
+
     # Only set the name if it was found and not obfuscated. Streamed articles never
     # reach here: a sink is only handed out once the filename has been checked, exactly
     # because this needs the bytes.

@@ -538,6 +538,11 @@ class TestDirectWriteGatingAndFailover:
         article = mock.MagicMock(spec=Article)
         article.nzf.filename_checked = True
         article.lowest_partnum = False
+        # Explicitly plain provenance: MagicMock auto-attributes would otherwise make
+        # _is_yenc_encrypted() truthy and trip the CR-01 plain-article reject.
+        article.nzf.nzo.yenc_encrypted = False
+        article.yenc_encrypted = False
+        article.segment_index = None
 
         response = mock.MagicMock(spec=sabctools.NNTPResponse)
         response.sink_failed = False
@@ -1540,7 +1545,9 @@ class TestCycle1AdversarialRemediation:
         response.yencryption = None
         response.lines = None
 
-        with pytest.raises(ValueError, match="Wire CRC error in encrypted article"):
+        # CR-01: no =yencryption on the wire for a declared-encrypted release means the
+        # article was substituted with a plain one - rejected before the CRC block.
+        with pytest.raises(ValueError, match="UNAUTHENTICATED_ARTICLE"):
             decoder.decode_yenc(article, response)
 
     def test_c3_03_baddata_discard_on_standalone_article(self):
@@ -1698,3 +1705,169 @@ class TestDotUnstuffing:
         decoded = decoder.decode_yenc(article, resp)
         assert decoded == bytearray(plaintext), "dot-stuffed Line 1 must decode to exact plaintext"
         assert article.segment_index == segment_index
+
+
+class TestUnauthenticatedPlainArticle:
+    """CR-01 / Zero-Output Rule: plain article under a declared-encrypted release is rejected."""
+
+    def _plain_response(self):
+        import sabctools
+
+        resp = mock.MagicMock(spec=sabctools.NNTPResponse)
+        resp.sink_failed = False
+        resp.format = sabctools.EncodingFormat.YENC
+        resp.data = bytearray(b"plain unencrypted content")
+        resp.file_size = 100
+        resp.part_begin = 0
+        resp.part_size = len(resp.data)
+        resp.bytes_decoded = len(resp.data)
+        resp.file_name = "plain.bin"
+        resp.crc = 0x12345678
+        resp.lines = None
+        resp.yencryption = None
+        return resp
+
+    def _enc_article(self, nzo_yenc_encrypted=True, art_yenc_encrypted=None):
+        article = mock.MagicMock(spec=Article)
+        article.article = "plain-sub@news"
+        article.nzf.nzo.yenc_encrypted = nzo_yenc_encrypted
+        article.nzf.nzo.precheck = False
+        article.lowest_partnum = False
+        if art_yenc_encrypted is not None:
+            article.yenc_encrypted = art_yenc_encrypted
+        return article
+
+    def test_plain_article_rejected_when_release_declared_encrypted(self):
+        """(1) yenc_encrypted release + plain yEnc response raises UNAUTHENTICATED_ARTICLE."""
+        import sabctools
+        import sabnzbd.decoder as decoder
+
+        article = self._enc_article()
+        response = self._plain_response()
+
+        with pytest.raises(ValueError, match="UNAUTHENTICATED_ARTICLE"):
+            decoder.decode_yenc(article, response)
+        # Raise happens before the CRC block populates article.crc32 (magic stays untouched)
+        article.crc32.assert_not_called if callable(article.crc32) else None
+        assert not article.crc32 == 0x12345678
+
+    def test_decode_routes_to_search_new_server_and_second_server_serves_authenticated_plaintext(self):
+        """(2) decode() routes through search_new_server; second server's encrypted article decodes to authenticated plaintext only."""
+        import nacl.bindings as nb
+        import sabctools
+        import sabnzbd.decoder as decoder
+
+        password = "plain_sub_password"
+        salt = bytes.fromhex("2a2b3c4d5e6f7890abcdef1234567890")
+        segment_index = 1
+        plaintext = b"Authenticated plaintext from the good server!"
+
+        adapter = DecryptionAdapter(password=password)
+        master_key = adapter.get_master_key(salt)
+        nonce = adapter.derive_body_nonce(master_key, segment_index)
+        enc = nb.crypto_aead_xchacha20poly1305_ietf_encrypt(plaintext, None, nonce, master_key)
+        ct = enc[:-16]
+        tag = enc[-16:]
+        body_encoded, body_crc = sabctools.yenc_encode(ct)
+
+        line1_pt = f"=ybegin line=128 size={len(ct)} name=good.bin".encode("ascii")
+        line2_pt = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} index={segment_index:08x} tag={tag.hex()}".encode(
+            "ascii"
+        )
+        line4_pt = f"=yend size={len(ct)} crc32={body_crc:08x}".encode("ascii")
+
+        k1, t1 = adapter.derive_control_keys(master_key, segment_index, 1)
+        k2, t2 = adapter.derive_control_keys(master_key, segment_index, 2)
+        k4, t4 = adapter.derive_control_keys(master_key, segment_index, 4)
+        wire1 = salt + segment_index.to_bytes(4, "big") + ff1_encrypt(k1, t1, line1_pt)
+        wire2 = ff1_encrypt(k2, t2, line2_pt)
+        wire4 = ff1_encrypt(k4, t4, line4_pt)
+
+        good_resp = mock.MagicMock(spec=sabctools.NNTPResponse)
+        good_resp.sink_failed = False
+        good_resp.bytes_decoded = 0
+        good_resp.lines = [
+            wire1.decode("latin-1"),
+            wire2.decode("latin-1"),
+            body_encoded.decode("latin-1"),
+            wire4.decode("latin-1"),
+        ]
+
+        article = self._enc_article()
+        article.article = "art@e2e"
+        article.nzf.nzo.password = password
+        article.segment_index = None
+        article.on_disk = False
+        article.search_new_server.return_value = True
+
+        plain_resp = self._plain_response()
+
+        # decode_yenc on server 1's plain response raises retriable ValueError
+        with pytest.raises(ValueError, match="UNAUTHENTICATED_ARTICLE"):
+            decoder.decode_yenc(article, plain_resp)
+
+        # decode() routes it to search_new_server (retriable tier), zero bytes stored
+        mock_cache = mock.MagicMock()
+        mock_queue = mock.MagicMock()
+        with (
+            mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
+            mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
+        ):
+            # Server 1: plain article -> failover
+            decoder.decode(article, plain_resp)
+            assert article.search_new_server.called
+            assert not mock_cache.save_article.called
+
+            # Server 2: real encrypted article -> authenticated plaintext cached, server 1's bytes never appear
+            mock_cache.reset_mock()
+            decoded = decoder.decode_yenc(article, good_resp)
+            assert bytes(decoded) == plaintext
+            assert b"plain unencrypted content" not in bytes(decoded)
+
+    def test_exhausted_servers_increments_bad_articles_with_zero_bytes_stored(self):
+        """(3) Exhausted servers: bad_articles incremented, zero bytes stored."""
+        import sabnzbd.decoder as decoder
+
+        article = self._enc_article()
+        article.article = "exhausted@e2e"
+        article.search_new_server.return_value = False
+        article.on_disk = False
+
+        plain_resp = self._plain_response()
+
+        mock_cache = mock.MagicMock()
+        mock_queue = mock.MagicMock()
+        with (
+            mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
+            mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
+        ):
+            # Servers exhausted: search_new_server returns False -> decode() re-raises the
+            # ValueError to the caller (develop behavior); bad_articles already incremented
+            # and zero bytes were stored.
+            with pytest.raises(ValueError, match="UNAUTHENTICATED_ARTICLE"):
+                decoder.decode(article, plain_resp)
+            assert article.nzf.nzo.increase_bad_articles_counter.called
+            assert not mock_cache.save_article.called
+            assert not article.on_disk
+
+    def test_plain_release_still_decodes_normally(self):
+        """(4) Compatibility regression guard: yenc_encrypted=False plain article decodes normally."""
+        import sabnzbd.decoder as decoder
+
+        article = self._enc_article(nzo_yenc_encrypted=False)
+        article.nzf.filename_checked = True
+        article.segment_index = None
+        response = self._plain_response()
+
+        assert decoder.decode_yenc(article, response) == response.data
+
+    def test_article_level_yenc_encrypted_flag_alone_rejected(self):
+        """(5) article.yenc_encrypted=True alone (no nzo flag) is still rejected."""
+        import sabnzbd.decoder as decoder
+
+        article = self._enc_article(nzo_yenc_encrypted=False, art_yenc_encrypted=True)
+        article.segment_index = None
+        response = self._plain_response()
+
+        with pytest.raises(ValueError, match="UNAUTHENTICATED_ARTICLE"):
+            decoder.decode_yenc(article, response)
