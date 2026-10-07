@@ -1871,3 +1871,46 @@ class TestUnauthenticatedPlainArticle:
 
         with pytest.raises(ValueError, match="UNAUTHENTICATED_ARTICLE"):
             decoder.decode_yenc(article, response)
+
+
+class TestStructuralNoPasswordEncryptedWire:
+    """WR-05: encrypted wire with no resolvable password raises structural error, never on_disk."""
+
+    def test_encrypted_wire_no_password_raises_structural(self):
+        import sabctools
+        import sabnzbd.decoder as decoder
+        from sabnzbd.encryption import YEncEncryptionStructuralError
+
+        article = mock.MagicMock(spec=Article)
+        article.article = "nopass@enc"
+        article.nzf.nzo.password = None
+        article.nzf.nzo.yenc_encrypted = True
+        article.nzf.nzo.precheck = False
+        article.password = None
+        article.segment_index = None
+        article.search_new_server.return_value = True
+        article.on_disk = False
+
+        resp = mock.MagicMock(spec=sabctools.NNTPResponse)
+        resp.sink_failed = False
+        resp.format = sabctools.EncodingFormat.YENC
+        resp.bytes_decoded = 0
+        resp.lines = ["=ybegin line=128 size=50 name=test.bin", "AAAABBBBCCCCDDDDEEEE", "=yend size=50"]
+        resp.data = None
+        resp.yencryption = None
+        resp.crc = None
+
+        with pytest.raises(YEncEncryptionStructuralError, match="MISSING_PASSWORD"):
+            decoder.decode_yenc(article, resp)
+
+        # decode() must abort the job - no failover, no on_disk, nothing stored
+        mock_cache = mock.MagicMock()
+        mock_queue = mock.MagicMock()
+        with (
+            mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
+            mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
+        ):
+            decoder.decode(article, resp)
+            assert not article.search_new_server.called
+            assert not mock_cache.save_article.called
+            assert not article.on_disk

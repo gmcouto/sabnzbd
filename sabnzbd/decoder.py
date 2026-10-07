@@ -267,11 +267,27 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
     if not password and hasattr(article, "password"):
         password = article.password
 
+    # WR-05 defense-in-depth (structural tier): an encrypted-wire article (sabctools
+    # decoded nothing) in a declared-encrypted release with NO resolvable password is
+    # a structural metadata failure - missing password aborts the job and the article
+    # is never marked on_disk, so zero plaintext or ciphertext is ever released.
+    if (
+        response.bytes_decoded == 0
+        and getattr(response, "lines", None)
+        and not password
+        and _is_yenc_encrypted(article)
+    ):
+        from sabnzbd.encryption import YEncEncryptionStructuralError
+
+        raise YEncEncryptionStructuralError(
+            f"MISSING_PASSWORD: encrypted wire article {getattr(article, 'article', '')} has no resolvable password"
+        )
+
     # Encrypted wire response: sabctools couldn't decode because control lines were FF1-encrypted
     if response.bytes_decoded == 0 and getattr(response, "lines", None) and password:
         import io
         import sabctools
-        from sabnzbd.encryption import extract_and_remove_yencryption
+        from sabnzbd.encryption import extract_and_remove_yencryption, YEncEncryptionStructuralError
 
         lines = [line.encode("latin-1") if isinstance(line, str) else line for line in response.lines]
 
