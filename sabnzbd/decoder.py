@@ -287,7 +287,7 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
     if response.bytes_decoded == 0 and getattr(response, "lines", None) and password:
         import io
         import sabctools
-        from sabnzbd.encryption import extract_and_remove_yencryption, YEncEncryptionStructuralError
+        from sabnzbd.encryption import extract_and_remove_yencryption
 
         lines = [line.encode("latin-1") if isinstance(line, str) else line for line in response.lines]
 
