@@ -226,10 +226,18 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
         if search_new_server(article):
             return
 
-    if decoded_data:
+    # WR-05-R4: distinguish "nothing produced" (None — streamed straight to disk
+    # or no decode happened) from "produced empty" (an authenticated zero-length
+    # plaintext, which the encrypted-wire path legitimately yields for empty
+    # segments). An empty-but-complete article must count as decoded, never fall
+    # through to the on_disk branch with zero bytes written anywhere.
+    if decoded_data is not None and len(decoded_data) > 0:
         # If the data needs to be written to disk due to full cache, this will be slow
         # Causing the decoder-queue to fill up and delay the downloader
         sabnzbd.ArticleCache.save_article(article, decoded_data)
+        article.decoded = True
+    elif decoded_data is not None:
+        # Authenticated empty segment: complete, nothing to cache or assemble.
         article.decoded = True
     elif not nzo.precheck and (article_success or not _is_yenc_encrypted(article)):
         # Either there was nothing to save, or the decoder streamed it straight to the

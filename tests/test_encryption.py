@@ -1364,6 +1364,28 @@ class TestCycle1AdversarialRemediation:
         # Empty input
         assert split_lines_preserving_endings(b"") == []
 
+    def test_in03_r4_split_lines_sub_bootstrap_non_y_input(self):
+        """IN-03-R4: sub-BOOTSTRAP_PREFIX_LEN non-'=y' input is one truncated Line 1 (Rust parity)."""
+        from sabnzbd.encryption import BOOTSTRAP_PREFIX_LEN, split_lines_preserving_endings
+
+        # A 0x0A inside the (missing) 20-byte prefix must NOT fragment Line 1.
+        raw = b"\xaa\x0a\xbb" + b"\r\nrest"
+        lines = split_lines_preserving_endings(raw)
+        assert len(lines) == 1
+        assert lines[0] == raw
+
+        # Same for a lone unterminated fragment shorter than the prefix.
+        assert split_lines_preserving_endings(b"short") == [b"short"]
+
+        # At exactly BOOTSTRAP_PREFIX_LEN total (including an embedded 0x0A past
+        # the prefix window) the prefix skip applies: the \n after position 20 is
+        # not searched, so the input stays one line — matching Rust.
+        raw2 = b"\x01" * (BOOTSTRAP_PREFIX_LEN - 1) + b"\n" + b"tail"
+        assert len(raw2) == BOOTSTRAP_PREFIX_LEN + 4
+        lines2 = split_lines_preserving_endings(raw2)
+        assert len(lines2) == 1
+        assert lines2[0] == raw2
+
     def test_c2_01_restore_control_lines_min_lines_truncated(self):
         """C2-01: restore_control_lines rejects truncated blocks below min line count."""
         from sabnzbd.encryption import DecryptionAdapter
@@ -1914,6 +1936,59 @@ class TestStructuralNoPasswordEncryptedWire:
             assert not article.search_new_server.called
             assert not mock_cache.save_article.called
             assert not article.on_disk
+
+    def test_wr05_r4_authenticated_empty_segment_counts_as_decoded(self):
+        """WR-05-R4: an authenticated zero-length plaintext is decoded/complete —
+        it must never be marked on_disk with zero bytes written."""
+        import sabctools
+        import sabnzbd.decoder as decoder
+
+        article = mock.MagicMock(spec=Article)
+        article.article = "empty@enc"
+        article.nzf.nzo.password = "secret"
+        article.nzf.nzo.yenc_encrypted = True
+        article.nzf.nzo.precheck = False
+        article.segment_index = 1
+        article.search_new_server.return_value = True
+        article.on_disk = False
+        article.decoded = False
+
+        resp = mock.MagicMock(spec=sabctools.NNTPResponse)
+        resp.sink_failed = False
+        resp.format = sabctools.EncodingFormat.YENC
+        resp.bytes_decoded = 16
+        resp.data = bytearray(b"ciphertext-bytes")  # yEnc-decoded ciphertext, decrypts to b""
+        resp.lines = None
+        resp.yencryption = {
+            "cipher": "XChaCha20-Poly1305",
+            "salt": b"\x01" * 16,
+            "tag": b"\x02" * 16,
+            "segment_index": 1,
+        }
+
+        mock_cache = mock.MagicMock()
+        mock_queue = mock.MagicMock()
+        with (
+            mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
+            mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
+            mock.patch.object(
+                decoder,
+                "_get_decryption_adapter",
+                return_value=mock.MagicMock(
+                    decrypt_body=mock.MagicMock(return_value=b"")
+                ),
+            ) as get_adapter,
+        ):
+            decoded = decoder.decode(article, resp)
+            # decode() communicates via article state: an empty authenticated
+            # plaintext IS complete — nothing cached, and crucially NOT on_disk
+            # (zero bytes were written anywhere).
+            assert decoded is None
+            assert article.decoded is True
+            assert not article.on_disk
+            assert not mock_cache.save_article.called
+            get_adapter.return_value.decrypt_body.assert_called_once()
+            assert article.segment_index == 1
 
 
 class TestHeaderRegionFailClosed:

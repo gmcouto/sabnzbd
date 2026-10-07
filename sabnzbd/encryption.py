@@ -375,8 +375,16 @@ def split_lines_preserving_endings(input_bytes: bytes) -> list[bytes]:
     total = len(input_bytes)
     while pos < total:
         start = pos
-        if not lines and not input_bytes.startswith(b"=y") and total >= BOOTSTRAP_PREFIX_LEN:
-            pos += BOOTSTRAP_PREFIX_LEN
+        if not lines and not input_bytes.startswith(b"=y"):
+            if total >= BOOTSTRAP_PREFIX_LEN:
+                pos += BOOTSTRAP_PREFIX_LEN
+            else:
+                # IN-03-R4: match Rust (control.rs split_lines_preserving_endings)
+                # — input too short to carry the 20-byte bootstrap prefix is
+                # treated as one truncated Line 1 so a stray 0x0A inside the
+                # (missing) prefix cannot fragment it; both clients then report
+                # the same LINE_TRUNCATED-style failure for identical bytes.
+                pos = total
         idx = input_bytes.find(b"\n", pos)
         if idx != -1:
             pos = idx + 1
