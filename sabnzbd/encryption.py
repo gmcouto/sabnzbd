@@ -296,7 +296,7 @@ def extract_and_remove_yencryption(yenc_block: bytes) -> tuple[dict[str, Any], b
     if len(raw_lines) < 2:
         raise ValueError(f"Article block too short: {len(raw_lines)} line(s)")
 
-    line1 = raw_lines[0].lstrip()
+    line1 = raw_lines[0]
     if not line1.startswith(b"=ybegin"):
         raise ValueError("Line 1 does not start with =ybegin")
 
@@ -305,21 +305,21 @@ def extract_and_remove_yencryption(yenc_block: bytes) -> tuple[dict[str, Any], b
     if is_multipart:
         if len(raw_lines) < 3:
             raise ValueError(f"Multipart article too short: {len(raw_lines)} line(s)")
-        line2 = raw_lines[1].lstrip()
+        line2 = raw_lines[1]
         if not line2.startswith(b"=ypart"):
             raise ValueError("Line 2 in multipart article does not start with =ypart")
-        line3 = raw_lines[2].lstrip()
+        line3 = raw_lines[2]
         if not line3.startswith(b"=yencryption"):
             raise ValueError("Line 3 in multipart article does not start with =yencryption")
         yenc_idx = 2
     else:
-        line2 = raw_lines[1].lstrip()
+        line2 = raw_lines[1]
         if not line2.startswith(b"=yencryption"):
             raise ValueError("Line 2 in single-part article does not start with =yencryption")
         yenc_idx = 1
 
     for idx, r_line in enumerate(raw_lines):
-        if idx != yenc_idx and r_line.lstrip().startswith(b"=yencryption"):
+        if idx != yenc_idx and r_line.startswith(b"=yencryption"):
             raise ValueError(f"Duplicate or misplaced =yencryption found at line {idx + 1}")
 
     yenc_line = raw_lines[yenc_idx]
@@ -555,8 +555,15 @@ class DecryptionAdapter:
                 enc_key, tweak = self.derive_control_keys(master_key, line1_segment_index, line_index)
                 try:
                     pt = self.decrypt_control_line(content, enc_key, tweak)
-                except Exception:
-                    pt = None
+                except Exception as e:
+                    # WR-02 fail-closed (Control Std v1.2 §5 step 4a): only decryption
+                    # SUCCESS yielding non-=y content terminates the header loop (first
+                    # data line). An FF1 error on an expected header line is retriable
+                    # provider corruption - the raw wire line is never passed through
+                    # as a data line.
+                    raise ValueError(
+                        f"PROVIDER_FAILOVER: control-line decryption failed at line {line_index} in the header region"
+                    ) from e
 
                 if pt and pt.startswith(b"=y"):
                     if is_multipart and line_index == 2:

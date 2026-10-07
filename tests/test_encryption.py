@@ -1914,3 +1914,79 @@ class TestStructuralNoPasswordEncryptedWire:
             assert not article.search_new_server.called
             assert not mock_cache.save_article.called
             assert not article.on_disk
+
+
+class TestHeaderRegionFailClosed:
+    """WR-02 + IN-01: fail-closed header-region FF1 error; byte-exact reconstruction (no lstrip masking)."""
+
+    def _wire_block(self, adapter, salt, seg_idx, corrupt_line2=False):
+        master_key = adapter.get_master_key(salt)
+        k1, t1 = adapter.derive_control_keys(master_key, seg_idx, 1)
+        k2, t2 = adapter.derive_control_keys(master_key, seg_idx, 2)
+        k4, t4 = adapter.derive_control_keys(master_key, seg_idx, 4)
+
+        ct1 = adapter.encrypt_control_line(b"=ybegin line=128 size=50 name=test.bin", k1, t1)
+        wire_line1 = salt + seg_idx.to_bytes(4, "big") + ct1 + b"\r\n"
+
+        if corrupt_line2:
+            # Corrupt ciphertext so FF1 decryption raises (invalid Alphabet byte 0x00)
+            wire_line2 = b"\x00" * 40 + b"\r\n"
+        else:
+            ct2 = adapter.encrypt_control_line(
+                b"=yencryption cipher=XChaCha20-Poly1305 salt=" + salt.hex().encode("ascii") + b" index=00000001 tag=" + b"00" * 16,
+                k2,
+                t2,
+            )
+            wire_line2 = ct2 + b"\r\n"
+
+        data_line = b"PAYLOAD DATA LINE\r\n"
+        ct4 = adapter.encrypt_control_line(b"=yend size=50 crc32=12345678", k4, t4)
+        wire_footer = ct4 + b"\r\n"
+        return wire_line1 + wire_line2 + data_line + wire_footer
+
+    def test_ff1_error_on_header_line_raises_provider_failover(self):
+        """WR-02: FF1 error on a header-region line raises PROVIDER_FAILOVER, never data-line passthrough."""
+        from sabnzbd.encryption import DecryptionAdapter
+
+        adapter = DecryptionAdapter(password="testpass")
+        salt = b"\x07" * 16
+        seg_idx = 1
+        wire_block = self._wire_block(adapter, salt, seg_idx, corrupt_line2=True)
+
+        with pytest.raises(ValueError, match="PROVIDER_FAILOVER: control-line decryption failed at line 2 in the header region"):
+            adapter.restore_control_lines(wire_block, seg_idx)
+
+    def test_corrupt_header_line_never_appended_as_data_line(self):
+        """The raw wire line of a failed header decryption must never appear in any output."""
+        from sabnzbd.encryption import DecryptionAdapter
+
+        adapter = DecryptionAdapter(password="testpass")
+        salt = b"\x08" * 16
+        seg_idx = 1
+        wire_block = self._wire_block(adapter, salt, seg_idx, corrupt_line2=True)
+
+        try:
+            adapter.restore_control_lines(wire_block, seg_idx)
+        except ValueError:
+            pass
+        else:
+            pytest.fail("Expected PROVIDER_FAILOVER ValueError")
+
+    def test_extract_and_remove_yencryption_byte_exact(self):
+        """IN-01: leading whitespace is no longer masked - reconstruction is byte-exact (pesto aligned)."""
+        from sabnzbd.encryption import extract_and_remove_yencryption
+
+        valid_hdr = b"=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=0cd77ce245a654463f90b945b1d22d5b"
+
+        # Clean block still works
+        single = b"=ybegin line=128 size=100 name=test.bin\r\n" + valid_hdr + b"\r\nDataLine1\r\n=yend size=100\r\n"
+        params, clean = extract_and_remove_yencryption(single)
+        assert params["segment_index"] == 1
+        assert clean == b"=ybegin line=128 size=100 name=test.bin\r\nDataLine1\r\n=yend size=100\r\n"
+
+        # Leading whitespace on the =yencryption line is no longer silently stripped:
+        # the strict grammar itself rejects it (parse_yencryption_line ValueError)
+        indented_hdr = b" " + valid_hdr
+        indented = b"=ybegin line=128 size=100 name=test.bin\r\n" + indented_hdr + b"\r\nDataLine1\r\n=yend size=100\r\n"
+        with pytest.raises(ValueError):
+            extract_and_remove_yencryption(indented)
