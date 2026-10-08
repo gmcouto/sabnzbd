@@ -351,7 +351,10 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
         reader = io.BytesIO(clean_wire)
         reader.readinto(dec)
         dec.process(len(clean_wire))
-        sub_resp = next(dec)
+        try:
+            sub_resp = next(dec)
+        except StopIteration:
+            raise ValueError("Truncated or malformed yEnc block in encrypted article")
 
         if sub_resp.crc is None:
             raise ValueError(f"Wire CRC error in encrypted article {getattr(article, 'article', '')}")
@@ -409,7 +412,12 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
         elif isinstance(yenc_info, (str, bytes)):
             from sabnzbd.encryption import parse_yencryption_line
 
-            parsed_enc = parse_yencryption_line(yenc_info)
+            try:
+                parsed_enc = parse_yencryption_line(yenc_info)
+            except Exception as e:
+                raise ValueError(f"Malformed =yencryption line in article: {e}") from e
+        if not parsed_enc:
+            raise ValueError(f"Malformed or unparsed =yencryption line in article: {yenc_info!r}")
 
     if parsed_enc:
         if decoded_data is None:

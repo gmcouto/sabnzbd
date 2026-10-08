@@ -949,6 +949,15 @@ class TestDirectWriteGatingAndFailover:
                     wire = bytes.fromhex(vec["line1_hex"]) + b"\r\n"
                     with pytest.raises(ValueError, match="ZERO_SEGMENT_INDEX"):
                         adapter.restore_control_lines(wire, segment_index=1)
+                elif vec_id in (
+                    "control-syntax-08-forbidden-index-10",
+                    "control-syntax-09-forbidden-index-13",
+                    "control-syntax-10-forbidden-index-266",
+                    "control-syntax-11-forbidden-index-269",
+                ):
+                    wire = bytes.fromhex(vec["line1_hex"]) + b"\r\n"
+                    with pytest.raises(ValueError, match="FORBIDDEN_SEGMENT_INDEX_BYTE"):
+                        adapter.restore_control_lines(wire, segment_index=1)
                 elif vec_id in ("control-syntax-06-wrong-password", "control-syntax-07-wrong-password"):
                     # Valid wire line 1 from control_line_encryption.json
                     wire_line1 = bytes.fromhex(control_data["vectors"][0]["expected_wire_hex"]) + b"\r\n"

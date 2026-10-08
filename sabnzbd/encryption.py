@@ -259,6 +259,12 @@ def parse_yencryption_line(line: str | bytes) -> Optional[dict[str, Any]]:
     if segment_index == 0:
         return None
 
+    idx_bytes = struct.pack(">I", segment_index)
+    if b"\x0a" in idx_bytes or b"\x0d" in idx_bytes:
+        raise ValueError(
+            f"FORBIDDEN_SEGMENT_INDEX_BYTE: segment index {segment_index} contains 0x0A or 0x0D (CR-02)"
+        )
+
     try:
         salt = bytes.fromhex(salt_hex)
         tag = bytes.fromhex(tag_hex)
