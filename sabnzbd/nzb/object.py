@@ -189,6 +189,7 @@ NzbObjectSaver = (
     "next_save",
     "save_timeout",
     "encrypted",
+    "yenc_encrypted",
     "bad_articles",
     "duplicate",
     "duplicate_key",
@@ -207,7 +208,7 @@ NzbObjectSaver = (
     "time_added",
 )
 
-NzoAttributeSaver = ("cat", "pp", "script", "priority", "final_name", "password", "url")
+NzoAttributeSaver = ("cat", "pp", "script", "priority", "final_name", "password", "url", "yenc_encrypted")
 
 
 class NzbObject(TryList):
@@ -348,6 +349,7 @@ class NzbObject(TryList):
         self.next_save = None
         self.save_timeout = None
         self.encrypted = 0
+        self.yenc_encrypted: bool = False
         self.url_wait: Optional[float] = None
         self.url_tries = 0
         self.pp_active = False
@@ -1596,13 +1598,19 @@ class NzbObject(TryList):
         attribs = {}
         for attrib in NzoAttributeSaver:
             attribs[attrib] = getattr(self, attrib)
-        logging.debug("Saving attributes %s for %s", attribs, self.final_name)
+        safe_attribs = {k: ("<redacted>" if k == "password" and v else v) for k, v in attribs.items()}
+        logging.debug("Saving attributes %s for %s", safe_attribs, self.final_name)
         save_data(attribs, ATTRIB_FILE, self.admin_path, silent=True)
 
     def load_attribs(self) -> tuple[Optional[str], Optional[int], Optional[str]]:
         """Load saved attributes and return them to be parsed"""
         attribs = load_data(ATTRIB_FILE, self.admin_path, remove=False)
-        logging.debug("Loaded attributes %s for %s", attribs, self.final_name)
+        safe_attribs = (
+            {k: ("<redacted>" if k == "password" and v else v) for k, v in attribs.items()}
+            if isinstance(attribs, dict)
+            else attribs
+        )
+        logging.debug("Loaded attributes %s for %s", safe_attribs, self.final_name)
 
         # If attributes file somehow does not exist
         if not attribs:
@@ -1613,6 +1621,9 @@ class NzbObject(TryList):
             # Only set if it is present and has a value
             if attribs.get(attrib):
                 setattr(self, attrib, attribs[attrib])
+
+        if attribs.get("yenc_encrypted") is not None:
+            self.yenc_encrypted = bool(attribs["yenc_encrypted"])
 
         # Only set password if it wasn't already set
         if not self.password and attribs.get("password"):
@@ -1779,6 +1790,8 @@ class NzbObject(TryList):
                 # Handle new attributes
                 setattr(self, item, None)
         self.lock = threading.RLock()
+        if self.yenc_encrypted is None:
+            self.yenc_encrypted = False
         super().__setstate__(dict_.get("try_list", []))
 
         # Set non-transferable values

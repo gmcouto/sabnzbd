@@ -37,6 +37,10 @@ httptools==0.8.0
 # Using older versions can have security implications!
 cryptography>=3.0
 
+# yEnc encryption (experimental)
+argon2-cffi==25.1.0
+pynacl==1.6.2
+
 # We recommend using "orjson" as it is 2x as fast as "ujson". However, it requires
 # Rust so SABnzbd works just as well with "ujson" or the Python built in "json" module
 ujson==6.0.0
