@@ -339,7 +339,7 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
 
         art_id = getattr(article, "article", "enc")
         if isinstance(art_id, str):
-            art_bytes = art_id.encode("ascii", "replace")
+            art_bytes = art_id.replace("\r", "").replace("\n", "").encode("ascii", "replace")
         else:
             art_bytes = b"enc"
         clean_wire = b"222 0 <" + art_bytes + b">\r\n" + clean_yenc

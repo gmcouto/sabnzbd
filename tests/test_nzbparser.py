@@ -160,6 +160,28 @@ class TestNzbParser:
         with pytest.raises(YEncEncryptionStructuralError, match="MISSING_PASSWORD"):
             nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, "explicit", explicit_xml), explicit_nzo)
 
+        empty_pw_xml = """<?xml version="1.0" encoding="utf-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
+ <head><meta type="yenc_encrypted">true</meta><meta type="password"></meta></head>
+ <file poster="p@test.com" date="1600000000" subject="opaque">
+  <segments><segment bytes="1000" number="1">empty_pw@test</segment></segments>
+ </file>
+</nzb>"""
+        empty_pw_nzo = NzbObject("empty_pw")
+        with pytest.raises(YEncEncryptionStructuralError, match="MISSING_PASSWORD"):
+            nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, "empty_pw", empty_pw_xml), empty_pw_nzo)
+
+        ws_pw_xml = """<?xml version="1.0" encoding="utf-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
+ <head><meta type="yenc_encrypted">true</meta><meta type="password">   </meta></head>
+ <file poster="p@test.com" date="1600000000" subject="opaque">
+  <segments><segment bytes="1000" number="1">ws_pw@test</segment></segments>
+ </file>
+</nzb>"""
+        ws_pw_nzo = NzbObject("ws_pw")
+        with pytest.raises(YEncEncryptionStructuralError, match="MISSING_PASSWORD"):
+            nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, "ws_pw", ws_pw_xml), ws_pw_nzo)
+
     @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
     def test_password_redacted_from_parser_logs(self, caplog):
         """Captured parser logs may name metadata keys but never contain the password value."""

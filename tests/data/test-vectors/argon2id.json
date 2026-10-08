@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "standard": "yEnc Body & Control Lines Encryption Standards v1.0",
+  "standard": "yEnc Body & Control Lines Encryption Standards v1.2",
   "requirement": "VEC-01",
   "parameters": {
     "algorithm": "Argon2id",

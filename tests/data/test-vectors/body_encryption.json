@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "standard": "yEnc Body Encryption Standard v1.1",
+  "standard": "yEnc Body Encryption Standard v1.2",
   "requirement": "VEC-03",
   "cipher": "XChaCha20-Poly1305",
   "vectors": [

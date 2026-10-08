@@ -370,3 +370,45 @@ class TestEncryptionPhase58:
             assert not mock_cache.save_article.called, "zero-output: nothing cached on structural failure"
             assert not article.on_disk
             mock_queue.register_article.assert_called_with(article, False)
+
+    def test_synthetic_nntp_header_sanitizes_crlf(self):
+        """Synthetic NNTP response header strips \\r and \\n from art_id to prevent header injection."""
+        import sabnzbd.decoder as decoder
+
+        article = mock.MagicMock(spec=Article)
+        article.article = "injected\r\nX-Bad-Header: true\r\n@test.com"
+        article.nzf.nzo.password = "testpass"
+
+        response = mock.MagicMock(spec=sabctools.NNTPResponse)
+        response.sink_failed = False
+        response.bytes_decoded = 0
+        response.lines = [b"=ybegin line=128 size=10 name=test.bin", b"data"]
+
+        mock_adapter = mock.MagicMock()
+        mock_adapter.restore_control_lines.return_value = (b"=ybegin line=128 size=10 name=test.bin\r\n", b"\x01" * 16, 1)
+
+        captured_clean_wire = []
+
+        with (
+            mock.patch("sabnzbd.decoder._get_decryption_adapter", return_value=mock_adapter),
+            mock.patch("sabnzbd.encryption.extract_and_remove_yencryption", return_value=(
+                {"cipher": "XChaCha20-Poly1305", "salt": b"\x01" * 16, "tag": b"\x02" * 16, "segment_index": 1},
+                b"=ybegin line=128 size=10 name=test.bin\r\n"
+            )),
+            mock.patch("io.BytesIO") as mock_bytes_io,
+        ):
+            def capture_bytes(data):
+                captured_clean_wire.append(data)
+                raise StopIteration("captured")
+
+            mock_bytes_io.side_effect = capture_bytes
+            try:
+                decoder.decode_yenc(article, response)
+            except StopIteration:
+                pass
+
+        assert len(captured_clean_wire) == 1
+        wire = captured_clean_wire[0]
+        assert wire.startswith(b"222 0 <injectedX-Bad-Header: true@test.com>\r\n")
+        assert b"\r" not in wire.split(b"\r\n")[0]
+        assert b"\n" not in wire.split(b"\r\n")[0]

@@ -525,7 +525,14 @@ def nzbfile_parser(full_nzb_path: str, nzo, force_encrypted: bool = False):
             # NZB without a password can never be decrypted, so fail the job HERE - before
             # queue admission and before any article scheduling or NNTP contact. The
             # decode-time check in encryption.get_master_key remains as defense-in-depth.
-            if not (nzo.meta.get("password") or getattr(nzo, "password", None)):
+            raw_meta_passwords = nzo.meta.get("password") or []
+            if isinstance(raw_meta_passwords, str):
+                raw_meta_passwords = [raw_meta_passwords]
+            has_meta_pw = any(isinstance(p, str) and p.strip() for p in raw_meta_passwords)
+            attr_pw = getattr(nzo, "password", None)
+            has_attr_pw = isinstance(attr_pw, str) and bool(attr_pw.strip())
+
+            if not (has_meta_pw or has_attr_pw):
                 raise YEncEncryptionStructuralError(
                     "MISSING_PASSWORD: NZB declares yenc_encrypted=true but no password meta was supplied"
                 )

@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "standard": "yEnc Control Lines Encryption Standard v1.1",
+  "standard": "yEnc Control Lines Encryption Standard v1.2",
   "requirement": "VEC-04",
   "cipher": "FF1",
   "radix": 253,

@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "standard": "yEnc Body & Control Lines Encryption Standards v1.0",
+  "standard": "yEnc Body & Control Lines Encryption Standards v1.2",
   "requirement": "VEC-02",
   "parameters": {
     "integer_encoding": "uint32_be (4-byte unsigned big-endian network byte order)",
