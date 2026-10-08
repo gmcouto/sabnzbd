@@ -158,13 +158,20 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
 
     except ValueError:
         # Authentication failure on encrypted articles: log without secrets and
-        # query next server (retryable provider corruption). Ordinary ValueErrors
-        # keep develop behavior: re-raise so the caller classifies them.
+        # query next server (retryable provider corruption). Unencrypted articles
+        # that raise ValueError are also eligible for search_new_server rather than
+        # crashing the downloader thread (develop caught BadYenc and ValueError together).
+        # When servers are exhausted, cleanly fall through to register failure.
         if _is_yenc_encrypted(article):
             logging.info("Authentication failed for %s, trying next server", art_id)
-            if search_new_server(article):
-                return
-        raise
+        else:
+            logging.info("Badly formed article %s", art_id)
+
+        # Continue to the next one if we found new server
+        if search_new_server(article):
+            return
+
+        decoded_data = None
 
     except SinkFailed:
         # The file went away under the article, so it has to be fetched again. Any

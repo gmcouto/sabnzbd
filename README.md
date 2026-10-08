@@ -62,9 +62,10 @@ Article Bootstrap Standard.
   custom segment attributes.
 - **Automatic Decryption**: Encrypted releases containing `<meta type="yenc_encrypted">true</meta>` and
   embedded password metadata decrypt automatically without manual interaction.
-- **Manual Password Entry**: For encrypted releases without embedded passwords, passwords can be
-  supplied through the Web UI (Queue item edit / Password field) or via API (`addfile` / `addurl`
-  with `password` parameter).
+- **Manual Password Entry**: For encrypted releases without embedded password metadata, the password
+  must be supplied at submission time via Web UI upload or API (`addfile` / `addurl` with `password`
+  parameter). Encrypted releases without a password fail structural validation at ingest time and are
+  not admitted to the queue.
 - **Security & Integrity**: Direct-write streaming is gated for encrypted releases to prevent
   unauthenticated ciphertext from reaching disk. Poly1305 authentication failure or wire header
   mismatches trigger Usenet multi-server failover before failing the article. Zero unauthenticated

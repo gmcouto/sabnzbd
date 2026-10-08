@@ -489,6 +489,25 @@ class TestDirectWriteGatingAndFailover:
             assert art_broken.search_new_server.called
             assert art_broken.nzf.nzo.increase_bad_articles_counter.called
 
+        # Case 3: Candidate encrypted article with article-level yenc_encrypted=True
+        art_artlevel = mock.MagicMock(spec=Article)
+        art_artlevel.fetcher.id = 1
+        art_artlevel.nzf.nzo.password = "secret_pass"
+        art_artlevel.nzf.nzo.yenc_encrypted = False
+        art_artlevel.yenc_encrypted = True
+        art_artlevel.segment_index = None
+        art_artlevel.nzf.nzo.precheck = False
+
+        with (
+            mock.patch.object(sabnzbd, "BPSMeter", mock_bps, create=True),
+            mock.patch.object(sabnzbd.decoder, "decode") as mock_decoder_decode,
+        ):
+            Downloader.decode(art_artlevel, resp_cand)
+            assert (
+                mock_decoder_decode.called
+            ), "Expected article-level yenc_encrypted to be recognized by Downloader.decode"
+            assert not art_artlevel.search_new_server.called
+
     def test_missing_segment_index_fails_closed(self):
         """Encrypted articles without segment identity in header or article release no output."""
         import sabctools
@@ -1761,7 +1780,6 @@ class TestUnauthenticatedPlainArticle:
 
     def test_plain_article_rejected_when_release_declared_encrypted(self):
         """(1) yenc_encrypted release + plain yEnc response raises UNAUTHENTICATED_ARTICLE."""
-        import sabctools
         import sabnzbd.decoder as decoder
 
         article = self._enc_article()
@@ -1863,14 +1881,14 @@ class TestUnauthenticatedPlainArticle:
             mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
             mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
         ):
-            # Servers exhausted: search_new_server returns False -> decode() re-raises the
-            # ValueError to the caller (develop behavior); bad_articles already incremented
-            # and zero bytes were stored.
-            with pytest.raises(ValueError, match="UNAUTHENTICATED_ARTICLE"):
-                decoder.decode(article, plain_resp)
+            # Servers exhausted: search_new_server returns False -> decode() cleanly registers
+            # failure via NzbQueue.register_article(article, False) without crashing;
+            # bad_articles already incremented and zero bytes were stored.
+            decoder.decode(article, plain_resp)
             assert article.nzf.nzo.increase_bad_articles_counter.called
             assert not mock_cache.save_article.called
             assert not article.on_disk
+            mock_queue.register_article.assert_called_once_with(article, False)
 
     def test_plain_release_still_decodes_normally(self):
         """(4) Compatibility regression guard: yenc_encrypted=False plain article decodes normally."""
@@ -1893,6 +1911,39 @@ class TestUnauthenticatedPlainArticle:
 
         with pytest.raises(ValueError, match="UNAUTHENTICATED_ARTICLE"):
             decoder.decode_yenc(article, response)
+
+    def test_unencrypted_article_value_error_eligible_for_server_search(self):
+        """(6) Unencrypted article raising ValueError is eligible for search_new_server and registers failure on exhaustion."""
+        import sabnzbd.decoder as decoder
+
+        article = self._enc_article(nzo_yenc_encrypted=False)
+        article.article = "unenc_valerr@news"
+        article.nzf.filename_checked = True
+        article.segment_index = None
+        article.on_disk = False
+        article.search_new_server.return_value = True
+
+        response = self._plain_response()
+
+        mock_cache = mock.MagicMock()
+        mock_queue = mock.MagicMock()
+        with (
+            mock.patch("sabnzbd.decoder.decode_yenc", side_effect=ValueError("bad unencrypted data")),
+            mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
+            mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
+        ):
+            # Server search succeeds -> returns early
+            decoder.decode(article, response)
+            assert article.search_new_server.called
+            assert not mock_queue.register_article.called
+
+            # Server search fails (exhausted) -> cleanly registers failure without crash
+            article.search_new_server.reset_mock()
+            article.search_new_server.return_value = False
+            decoder.decode(article, response)
+            assert article.search_new_server.called
+            assert article.nzf.nzo.increase_bad_articles_counter.called
+            mock_queue.register_article.assert_called_with(article, False)
 
 
 class TestStructuralNoPasswordEncryptedWire:
@@ -1974,9 +2025,7 @@ class TestStructuralNoPasswordEncryptedWire:
             mock.patch.object(
                 decoder,
                 "_get_decryption_adapter",
-                return_value=mock.MagicMock(
-                    decrypt_body=mock.MagicMock(return_value=b"")
-                ),
+                return_value=mock.MagicMock(decrypt_body=mock.MagicMock(return_value=b"")),
             ) as get_adapter,
         ):
             decoded = decoder.decode(article, resp)
@@ -2008,7 +2057,10 @@ class TestHeaderRegionFailClosed:
             wire_line2 = b"\x00" * 40 + b"\r\n"
         else:
             ct2 = adapter.encrypt_control_line(
-                b"=yencryption cipher=XChaCha20-Poly1305 salt=" + salt.hex().encode("ascii") + b" index=00000001 tag=" + b"00" * 16,
+                b"=yencryption cipher=XChaCha20-Poly1305 salt="
+                + salt.hex().encode("ascii")
+                + b" index=00000001 tag="
+                + b"00" * 16,
                 k2,
                 t2,
             )
@@ -2028,7 +2080,9 @@ class TestHeaderRegionFailClosed:
         seg_idx = 1
         wire_block = self._wire_block(adapter, salt, seg_idx, corrupt_line2=True)
 
-        with pytest.raises(ValueError, match="PROVIDER_FAILOVER: control-line decryption failed at line 2 in the header region"):
+        with pytest.raises(
+            ValueError, match="PROVIDER_FAILOVER: control-line decryption failed at line 2 in the header region"
+        ):
             adapter.restore_control_lines(wire_block, seg_idx)
 
     def test_corrupt_header_line_never_appended_as_data_line(self):
@@ -2062,6 +2116,8 @@ class TestHeaderRegionFailClosed:
         # Leading whitespace on the =yencryption line is no longer silently stripped:
         # the strict grammar itself rejects it (parse_yencryption_line ValueError)
         indented_hdr = b" " + valid_hdr
-        indented = b"=ybegin line=128 size=100 name=test.bin\r\n" + indented_hdr + b"\r\nDataLine1\r\n=yend size=100\r\n"
+        indented = (
+            b"=ybegin line=128 size=100 name=test.bin\r\n" + indented_hdr + b"\r\nDataLine1\r\n=yend size=100\r\n"
+        )
         with pytest.raises(ValueError):
             extract_and_remove_yencryption(indented)

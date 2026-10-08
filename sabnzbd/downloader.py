@@ -574,6 +574,7 @@ class Downloader(Thread):
         is_encrypted = (
             getattr(getattr(getattr(article, "nzf", None), "nzo", None), "yenc_encrypted", False)
             or getattr(article, "segment_index", None) is not None
+            or getattr(article, "yenc_encrypted", False)
         )
 
         if not response or (
