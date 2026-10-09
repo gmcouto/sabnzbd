@@ -316,6 +316,13 @@ def decode_yenc(
     if not password:
         if hasattr(article, "nzf") and hasattr(article.nzf, "nzo"):
             password = getattr(article.nzf.nzo, "password", None)
+            if not password:
+                meta = getattr(article.nzf.nzo, "meta", None)
+                if meta and meta.get("password"):
+                    for p in meta["password"]:
+                        if p.strip():
+                            password = p.strip()
+                            break
         if not password and hasattr(article, "password"):
             password = article.password
 

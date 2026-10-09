@@ -427,7 +427,9 @@ def nzbfile_parser(full_nzb_path: str, nzo, force_encrypted: bool = False):
                 }
                 logging.debug("NZB file meta-data = %s", safe_meta)
 
-                meta_yenc = any(v.lower() == "true" for v in nzo.meta.get("yenc_encrypted", []))
+                meta_yenc = any(v.lower() == "true" for v in nzo.meta.get("yenc_encrypted", [])) or any(
+                    v.lower() in ("combined", "true", "yenc") for v in nzo.meta.get("encryption", [])
+                )
                 if meta_yenc or force_encrypted:
                     nzo.yenc_encrypted = True
                 if nzo.yenc_encrypted:
@@ -437,6 +439,11 @@ def nzbfile_parser(full_nzb_path: str, nzo, force_encrypted: bool = False):
                         raise YEncEncryptionStructuralError(
                             "MISSING_PASSWORD: NZB declares yenc_encrypted=true but no password meta was supplied"
                         )
+                    if not has_nzo_pw and has_meta_pw:
+                        for p in nzo.meta["password"]:
+                            if p.strip():
+                                nzo.password = p.strip()
+                                break
                 continue
 
             # Parse the files
@@ -536,7 +543,9 @@ def nzbfile_parser(full_nzb_path: str, nzo, force_encrypted: bool = False):
                 element.clear()
 
     # Final bookkeeping
-    meta_yenc = any(v.lower() == "true" for v in nzo.meta.get("yenc_encrypted", []))
+    meta_yenc = any(v.lower() == "true" for v in nzo.meta.get("yenc_encrypted", [])) or any(
+        v.lower() in ("combined", "true", "yenc") for v in nzo.meta.get("encryption", [])
+    )
     if meta_yenc or force_encrypted:
         nzo.yenc_encrypted = True
     if nzo.yenc_encrypted:
@@ -546,6 +555,11 @@ def nzbfile_parser(full_nzb_path: str, nzo, force_encrypted: bool = False):
             raise YEncEncryptionStructuralError(
                 "MISSING_PASSWORD: NZB declares yenc_encrypted=true but no password meta was supplied"
             )
+        if not has_nzo_pw and has_meta_pw:
+            for p in nzo.meta["password"]:
+                if p.strip():
+                    nzo.password = p.strip()
+                    break
 
     nr_files = max(1, valid_files)
     nzo.avg_stamp = avg_age_sum / nr_files
