@@ -191,8 +191,9 @@ class NewsWrapper:
         if not article or not sabnzbd.cfg.direct_decode() or not sabnzbd.cfg.direct_write():
             return None
 
+        nzo = getattr(getattr(article, "nzf", None), "nzo", None)
         if (
-            getattr(getattr(getattr(article, "nzf", None), "nzo", None), "yenc_encrypted", False)
+            getattr(nzo, "yenc_encrypted", False)
             or getattr(article, "segment_index", None) is not None
             or getattr(article, "yenc_encrypted", False)
         ):

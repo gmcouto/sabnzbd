@@ -21,15 +21,19 @@ tests.test_decoder- Testing functions in decoder.py
 
 import binascii
 import os
+import threading
 import pytest
 from io import BytesIO
 
 from random import randint
 from unittest import mock
 
+import nacl.bindings as nb
 import sabctools
+import sabnzbd
 import sabnzbd.decoder as decoder
-from sabnzbd.nzb import Article
+from sabnzbd.encryption import DecryptionAdapter, YEncEncryptionStructuralError
+from sabnzbd.nzb import Article, NzbFile
 
 
 def uu(data: bytes):
@@ -239,3 +243,148 @@ class TestUuDecoder:
             assert decoder.decode_uu(
                 article, self._response(bytearray(b"222 0 <foo@bar>\r\n" + filler + bad_data + b"\r\n.\r\n"))
             )
+
+
+class TestEncryptionPhase58:
+    def test_crc_clearing_on_encrypted_body_path(self):
+        password = "testpassword123"
+        salt = b"0123456789abcdef"
+        seg_idx = 1
+        plaintext = b"Decrypted Plaintext Secret Content 1234567890"
+
+        adapter = DecryptionAdapter(password)
+        key = adapter.get_master_key(salt)
+        nonce = adapter.derive_body_nonce(key, seg_idx)
+        ct_and_tag = nb.crypto_aead_xchacha20poly1305_ietf_encrypt(plaintext, None, nonce, key)
+        ciphertext = ct_and_tag[:-16]
+        tag = ct_and_tag[-16:]
+
+        yenc_line = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} index={seg_idx:08x} tag={tag.hex()}"
+
+        mock_resp = mock.Mock(spec=sabctools.NNTPResponse)
+        mock_resp.sink_failed = False
+        mock_resp.bytes_decoded = len(ciphertext)
+        mock_resp.data = bytearray(ciphertext)
+        mock_resp.file_size = len(plaintext)
+        mock_resp.part_begin = 1
+        mock_resp.part_size = len(plaintext)
+        mock_resp.file_name = "test.bin"
+        mock_resp.crc = 0x12345678  # wire ciphertext CRC
+        mock_resp.lines = [yenc_line]
+
+        mock_nzf = mock.Mock()
+        mock_nzf.filename_checked = True
+        mock_nzf.type = "yenc"
+        mock_nzo = mock.MagicMock()
+        mock_nzo.lock = threading.RLock()
+        mock_nzo.yenc_encrypted = True
+        mock_nzo.password = password
+        mock_nzf.nzo = mock_nzo
+        article = Article("test@example", len(ciphertext), mock_nzf, segment_index=seg_idx)
+
+        out = decoder.decode_yenc(article, mock_resp)
+        assert bytes(out) == plaintext
+        # CRC clearing: wire ciphertext CRC is stripped so it does not pollute verification
+        assert article.crc32 is None
+
+    def test_crc_propagation_skipping_quick_check(self):
+        class FakeNzo:
+            def __init__(self):
+                self.lock = threading.RLock()
+                self.admin_path = "/tmp"
+                self.files = []
+
+        fake_nzo = FakeNzo()
+        with mock.patch("sabnzbd.nzb.file.get_new_id", return_value="nzf123"), mock.patch(
+            "sabnzbd.nzb.file.save_data"
+        ):
+            nzf = NzbFile(None, "test subject", [], 200, fake_nzo)
+
+        art1 = Article("art1", 100, nzf)
+        art1.decoded_size = 100
+        art1.crc32 = 0x11111111
+
+        art2 = Article("art2", 100, nzf)
+        art2.decoded_size = 100
+        art2.crc32 = 0x22222222
+
+        nzf.decodetable = [art1, art2]
+        nzf.finalize_crc32()
+        assert nzf.crc32 is not None and isinstance(nzf.crc32, int)
+
+        # Clear CRC on one article (encrypted yEnc)
+        art1.crc32 = None
+        nzf.finalize_crc32()
+        assert nzf.crc32 is None
+
+    def test_structural_error_failing_job_without_server_search(self):
+        mock_resp = mock.Mock(spec=sabctools.NNTPResponse)
+        mock_resp.format = sabctools.EncodingFormat.YENC
+        mock_resp.sink_failed = False
+        mock_resp.bytes_decoded = 0
+        mock_resp.lines = ["corrupt_line"]
+
+        mock_nzo = mock.Mock()
+        mock_nzo.precheck = False
+        mock_nzo.yenc_encrypted = True
+        mock_nzo.password = None
+        mock_nzo.fail_msg = None
+
+        mock_nzf = mock.Mock()
+        mock_nzf.nzo = mock_nzo
+
+        art = Article("art3@test", 100, mock_nzf)
+
+        mock_cache = mock.MagicMock()
+        mock_queue = mock.MagicMock()
+        with (
+            mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
+            mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
+            mock.patch("sabnzbd.decoder.search_new_server") as mock_search,
+            mock.patch(
+                "sabnzbd.decoder.decode_yenc",
+                side_effect=YEncEncryptionStructuralError("MISSING_PASSWORD"),
+            ),
+        ):
+            decoder.decode(art, mock_resp)
+            mock_search.assert_not_called()
+            assert mock_nzo.fail_msg is not None
+            assert art.on_disk is False
+            assert not mock_cache.save_article.called
+
+    def test_failover_routing_on_auth_failure_with_zero_plaintext(self, caplog):
+        mock_resp = mock.Mock(spec=sabctools.NNTPResponse)
+        mock_resp.format = sabctools.EncodingFormat.YENC
+        mock_resp.sink_failed = False
+        mock_resp.bytes_decoded = 0
+        mock_resp.lines = ["candidate_encrypted_line"]
+
+        canary_secret = "super_secret_canary_pw_999"
+        mock_nzo = mock.Mock()
+        mock_nzo.precheck = False
+        mock_nzo.yenc_encrypted = True
+        mock_nzo.password = canary_secret
+
+        mock_nzf = mock.Mock()
+        mock_nzf.nzo = mock_nzo
+
+        art = Article("art_failover@test", 100, mock_nzf)
+
+        mock_cache = mock.MagicMock()
+        mock_queue = mock.MagicMock()
+        with (
+            mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
+            mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
+            mock.patch("sabnzbd.decoder.search_new_server", return_value=True) as mock_search,
+            mock.patch(
+                "sabnzbd.decoder.decode_yenc",
+                side_effect=ValueError("Poly1305 authentication failed"),
+            ),
+        ):
+            decoder.decode(art, mock_resp)
+            mock_search.assert_called_once()
+            assert art.on_disk is False
+            assert not mock_cache.save_article.called
+            # Verify no secret leaked into log messages
+            for record in caplog.records:
+                assert canary_secret not in record.message

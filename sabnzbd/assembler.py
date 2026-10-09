@@ -161,7 +161,11 @@ class Assembler(Thread):
                 self.open_writers.move_to_end(nzf.nzf_id)
                 return writer
 
-            if stream and (nzf.deleted or nzf.nzo.removed_from_queue):
+            if stream and (
+                nzf.deleted
+                or nzf.nzo.removed_from_queue
+                or getattr(nzf.nzo, "yenc_encrypted", False)
+            ):
                 return None
 
             if nzf.nzo.status is Status.DELETED:
