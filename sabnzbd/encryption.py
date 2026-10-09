@@ -369,7 +369,7 @@ def extract_salt_from_line1(line1: bytes) -> bytes:
 
 
 def split_lines_preserving_endings(input_bytes: bytes) -> list[bytes]:
-    """Split bytes into lines while preserving \r\n, \n, or \r endings.
+    """Split bytes into lines while preserving \r\n or \n endings.
 
     For encrypted wire articles (which do not begin with =y), Line 1 carries a
     20-byte bootstrap prefix ([16B salt][4B uint32_be(segmentIndex)]). Because
