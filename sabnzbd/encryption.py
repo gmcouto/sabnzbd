@@ -256,7 +256,7 @@ def parse_yencryption_line(line: str | bytes) -> Optional[dict[str, Any]]:
 
     # Exact 128-byte total length assertion (Body Std v1.2 grammar)
     if len(line) != 128:
-        raise ValueError(f"INVALID_LENGTH: =yencryption line must be exactly 128 characters, got {len(line)}")
+        return None
 
     salt_hex = tokens[2][len("salt=") :]
     index_hex = tokens[3][len("index=") :]
