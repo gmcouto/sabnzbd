@@ -32,6 +32,7 @@ from collections import deque
 import sabnzbd
 from sabnzbd.nzb.article import TryList, Article
 from sabnzbd.nzb.file import NzbFile
+from sabnzbd.encryption import YEncEncryptionStructuralError
 from sabnzbd.constants import (
     GIGI,
     ATTRIB_FILE,
@@ -411,6 +412,9 @@ class NzbObject(TryList):
             full_nzb_path = save_compressed(admin_dir, filename, nzb_fp)
             try:
                 sabnzbd.nzbparser.nzbfile_parser(full_nzb_path, self)
+            except YEncEncryptionStructuralError:
+                self.purge_data()
+                raise
             except Exception as err:
                 self.incomplete = True
                 logging.warning(T("Invalid NZB file %s, skipping (error: %s)"), filename, err)

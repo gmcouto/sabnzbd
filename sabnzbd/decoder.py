@@ -246,6 +246,7 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
     elif decoded_data is not None:
         # Authenticated empty segment: complete, nothing to cache or assemble.
         article.decoded = True
+        article.on_disk = True
     elif not nzo.precheck and (article_success or not _is_yenc_encrypted(article)):
         # Either there was nothing to save, or the decoder streamed it straight to the
         # file. Both are on disk as far as the rest of the pipeline is concerned; the

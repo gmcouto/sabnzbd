@@ -2039,11 +2039,11 @@ class TestStructuralNoPasswordEncryptedWire:
         ):
             decoded = decoder.decode(article, resp)
             # decode() communicates via article state: an empty authenticated
-            # plaintext IS complete — nothing cached, and crucially NOT on_disk
-            # (zero bytes were written anywhere).
+            # plaintext IS complete — nothing cached, marked on_disk so assembler
+            # advances without stalling on unwritten data.
             assert decoded is None
             assert article.decoded is True
-            assert not article.on_disk
+            assert article.on_disk
             assert not mock_cache.save_article.called
             get_adapter.return_value.decrypt_body.assert_called_once()
             assert article.segment_index == 1

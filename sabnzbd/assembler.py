@@ -126,7 +126,7 @@ class Assembler(Thread):
         nzf_id = article.nzf.nzf_id
         with self.ready_bytes_lock:
             # Could already be gone, for example when the file was finished or the job was removed
-            if (cur := self.ready_bytes.get(nzf_id, 0) - article.decoded_size) > 0:
+            if article.decoded_size and (cur := self.ready_bytes.get(nzf_id, 0) - article.decoded_size) > 0:
                 self.ready_bytes[nzf_id] = cur
             else:
                 self.ready_bytes.pop(nzf_id, None)
@@ -471,7 +471,7 @@ class Assembler(Thread):
                 # Could be empty in case nzo was deleted or a previous write attempt failed and the data was removed
                 # from the cache but could not be written to disk.
                 data = load_article(article)
-                if not data:
+                if data is None:
                     logging.info("No data found when trying to write %s", article)
                     continue
 
