@@ -385,18 +385,26 @@ class TestEncryptionPhase58:
         response.lines = [b"=ybegin line=128 size=10 name=test.bin", b"data"]
 
         mock_adapter = mock.MagicMock()
-        mock_adapter.restore_control_lines.return_value = (b"=ybegin line=128 size=10 name=test.bin\r\n", b"\x01" * 16, 1)
+        mock_adapter.restore_control_lines.return_value = (
+            b"=ybegin line=128 size=10 name=test.bin\r\n",
+            b"\x01" * 16,
+            1,
+        )
 
         captured_clean_wire = []
 
         with (
             mock.patch("sabnzbd.decoder._get_decryption_adapter", return_value=mock_adapter),
-            mock.patch("sabnzbd.encryption.extract_and_remove_yencryption", return_value=(
-                {"cipher": "XChaCha20-Poly1305", "salt": b"\x01" * 16, "tag": b"\x02" * 16, "segment_index": 1},
-                b"=ybegin line=128 size=10 name=test.bin\r\n"
-            )),
+            mock.patch(
+                "sabnzbd.encryption.extract_and_remove_yencryption",
+                return_value=(
+                    {"cipher": "XChaCha20-Poly1305", "salt": b"\x01" * 16, "tag": b"\x02" * 16, "segment_index": 1},
+                    b"=ybegin line=128 size=10 name=test.bin\r\n",
+                ),
+            ),
             mock.patch("io.BytesIO") as mock_bytes_io,
         ):
+
             def capture_bytes(data):
                 captured_clean_wire.append(data)
                 raise StopIteration("captured")
