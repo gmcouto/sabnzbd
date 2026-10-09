@@ -1647,3 +1647,39 @@ class TestCgroupMemoryLimit:
         with self.patched_open({}):
             with mock.patch("sabnzbd.misc._physical_memory", return_value=None):
                 assert misc.get_memory() == 0
+
+    def test_password_redaction(self, caplog):
+        from sabnzbd.nzb import NzbObject
+
+        nzo = NzbObject("test_redact")
+        nzo.password = "canary_user_pw_98765"
+        nzo.meta = {"password": ["canary_meta_pw_43210"]}
+
+        with caplog.at_level(logging.DEBUG):
+            pws = misc.get_all_passwords(nzo)
+
+        assert "canary_user_pw_98765" in pws
+        assert "canary_meta_pw_43210" in pws
+
+        assert "canary_user_pw_98765" not in caplog.text
+        assert "canary_meta_pw_43210" not in caplog.text
+        assert "<redacted>" in caplog.text
+        assert "Read 1 password(s) from meta data in NZB" in caplog.text
+
+    def test_c3_01_save_load_attribs_password_redaction(self, tmp_path, caplog):
+        from sabnzbd.nzb import NzbObject
+        import sabnzbd.cfg as cfg
+
+        cfg.download_dir.set(str(tmp_path))
+
+        nzo = NzbObject("test_attribs_redact")
+        os.makedirs(nzo.admin_path, exist_ok=True)
+        nzo.password = "secret_canary_attrib_password"
+        nzo.yenc_encrypted = True
+
+        with caplog.at_level(logging.DEBUG):
+            nzo.save_attribs()
+            nzo.load_attribs()
+
+        assert "secret_canary_attrib_password" not in caplog.text
+        assert "<redacted>" in caplog.text

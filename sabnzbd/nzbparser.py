@@ -29,11 +29,13 @@ import xml.etree.ElementTree
 import datetime
 import zipfile
 import tempfile
+import re
 
 from typing import Optional, Any
 from starlette.datastructures import UploadFile
 
 import sabnzbd
+from sabnzbd.encryption import YEncEncryptionStructuralError
 from sabnzbd.nzb import (
     NzbObject,
     NzbEmpty,
@@ -235,6 +237,8 @@ def process_nzb_archive_file(
                     ):
                         # Empty or fully rejected (including pre-queue rejections)
                         pass
+                    except YEncEncryptionStructuralError as err:
+                        logging.error("NZB structural encryption error: %s", err)
                     except NzbRejectToHistory as err:
                         # Duplicate or unwanted extension directed to history
                         sabnzbd.NzbQueue.fail_to_history(err.nzo)
@@ -357,6 +361,9 @@ def process_single_nzb(
         # Duplicate or unwanted extension directed to history
         sabnzbd.NzbQueue.fail_to_history(err.nzo)
         nzo_ids.append(err.nzo.nzo_id)
+    except YEncEncryptionStructuralError as err:
+        logging.error("NZB structural encryption error: %s", err)
+        result = AddNzbFileResult.ERROR
     except Exception:
         # Something else is wrong, show error
         logging.error(T("Error while adding %s, removing"), filename, exc_info=True)
@@ -378,7 +385,7 @@ def process_single_nzb(
     return result, nzo_ids
 
 
-def nzbfile_parser(full_nzb_path: str, nzo):
+def nzbfile_parser(full_nzb_path: str, nzo, force_encrypted: bool = False):
     # For type-hinting
     nzo: NzbObject
 
@@ -414,7 +421,22 @@ def nzbfile_parser(full_nzb_path: str, nzo):
                             nzo.meta[meta_type] = []
                         nzo.meta[meta_type].append(meta.text)
                 element.clear()
-                logging.debug("NZB file meta-data = %s", nzo.meta)
+                safe_meta = {
+                    k: (["<redacted>"] * len(v) if k.lower() == "password" else v)
+                    for k, v in nzo.meta.items()
+                }
+                logging.debug("NZB file meta-data = %s", safe_meta)
+
+                meta_yenc = any(v.lower() == "true" for v in nzo.meta.get("yenc_encrypted", []))
+                if meta_yenc or force_encrypted:
+                    nzo.yenc_encrypted = True
+                if nzo.yenc_encrypted:
+                    has_meta_pw = bool(nzo.meta.get("password") and any(bool(p.strip()) for p in nzo.meta["password"]))
+                    has_nzo_pw = bool(nzo.password and nzo.password.strip())
+                    if not (has_meta_pw or has_nzo_pw):
+                        raise YEncEncryptionStructuralError(
+                            "MISSING_PASSWORD: NZB declares yenc_encrypted=true but no password meta was supplied"
+                        )
                 continue
 
             # Parse the files
@@ -468,7 +490,7 @@ def nzbfile_parser(full_nzb_path: str, nzo):
                                 logging.info("Skipping article %s due to strange size (%s)", article_id, segment_size)
                                 nzo.increase_bad_articles_counter("bad_articles")
                             else:
-                                raw_article_db[partnum] = (article_id, segment_size)
+                                raw_article_db[partnum] = (article_id, segment_size, partnum)
                                 file_bytes += segment_size
                         except Exception:
                             # In case of missing attributes
@@ -482,9 +504,27 @@ def nzbfile_parser(full_nzb_path: str, nzo):
                 # Get the articles, making sure to sort the articles by part number
                 raw_article_db_sorted = [raw_article_db[partnum] for partnum in sorted(raw_article_db)]
 
+                # Extract file_ordinal and total_files if subject has [N/M]
+                file_ordinal = None
+                total_files = None
+                if m := re.search(r"\[(\d+)/(\d+)\]", file_name):
+                    try:
+                        file_ordinal = int(m.group(1))
+                        total_files = int(m.group(2))
+                    except ValueError:
+                        pass
+
                 # Create NZF
                 try:
-                    nzf = NzbFile(file_date, file_name, raw_article_db_sorted, file_bytes, nzo)
+                    nzf = NzbFile(
+                        file_date,
+                        file_name,
+                        raw_article_db_sorted,
+                        file_bytes,
+                        nzo,
+                        file_ordinal=file_ordinal,
+                        total_files=total_files,
+                    )
                 except SkippedNzbFile:
                     # Did not meet requirements, so continue
                     skipped_files += 1
@@ -496,6 +536,17 @@ def nzbfile_parser(full_nzb_path: str, nzo):
                 element.clear()
 
     # Final bookkeeping
+    meta_yenc = any(v.lower() == "true" for v in nzo.meta.get("yenc_encrypted", []))
+    if meta_yenc or force_encrypted:
+        nzo.yenc_encrypted = True
+    if nzo.yenc_encrypted:
+        has_meta_pw = bool(nzo.meta.get("password") and any(bool(p.strip()) for p in nzo.meta["password"]))
+        has_nzo_pw = bool(nzo.password and nzo.password.strip())
+        if not (has_meta_pw or has_nzo_pw):
+            raise YEncEncryptionStructuralError(
+                "MISSING_PASSWORD: NZB declares yenc_encrypted=true but no password meta was supplied"
+            )
+
     nr_files = max(1, valid_files)
     nzo.avg_stamp = avg_age_sum / nr_files
     nzo.avg_date = datetime.datetime.fromtimestamp(avg_age_sum / nr_files)

@@ -85,3 +85,131 @@ class TestNzbFile:
         files2.sort()
 
         assert [f.filename for f in files1] == [f.filename for f in files2]
+
+    def test_legacy_and_structured_lazy_tuples(self):
+        nzo = NzbObject("test_tuples")
+        nzf = NzbFile(datetime.now(), "test_file", [], 0, nzo)
+
+        art2 = nzf.add_article(("art-2@example.com", 2000))
+        assert art2.article == "art-2@example.com"
+        assert art2.bytes == 2000
+        assert art2.part_number is None
+        assert art2.segment_index is None
+
+        art3 = nzf.add_article(("art-3@example.com", 3000, 1))
+        assert art3.article == "art-3@example.com"
+        assert art3.bytes == 3000
+        assert art3.part_number == 1
+        assert art3.segment_index is None
+
+        art4 = nzf.add_article(("art-4@example.com", 4000, 2, 42))
+        assert art4.article == "art-4@example.com"
+        assert art4.bytes == 4000
+        assert art4.part_number == 2
+        assert art4.segment_index == 42
+
+    def test_missing_state_defaults_to_none(self):
+        nzo = NzbObject("test_missing")
+        nzf = NzbFile(datetime.now(), "test_file", [], 0, nzo)
+        state = nzf.__getstate__()
+        state.pop("file_ordinal", None)
+        state.pop("total_files", None)
+        state.pop("segment_index_base", None)
+
+        unpickled_nzf = NzbFile.__new__(NzbFile)
+        unpickled_nzf.__setstate__(state)
+        assert unpickled_nzf.file_ordinal is None
+        assert unpickled_nzf.total_files is None
+        assert unpickled_nzf.segment_index_base is None
+
+    def test_pickle_round_trip_preserves_identity_and_rebounds_locks(self):
+        import pickle
+
+        nzo = NzbObject("test_pickle")
+        nzf = NzbFile(
+            datetime.now(),
+            "test_file",
+            [],
+            0,
+            nzo,
+            file_ordinal=2,
+            total_files=5,
+            segment_index_base=10,
+        )
+        nzf.add_article(("art-1@example.com", 1000, 1, 10))
+        nzf.add_article(("art-2@example.com", 1000, 2, 11))
+
+        data = pickle.dumps(nzf)
+        restored: NzbFile = pickle.loads(data)
+
+        assert restored.file_ordinal == 2
+        assert restored.total_files == 5
+        assert restored.segment_index_base == 10
+        assert hasattr(restored, "lock") and restored.lock is not None
+
+        for art in restored.decodetable:
+            assert art.lock is restored.lock
+            assert art.part_number in (1, 2)
+            assert art.segment_index in (10, 11)
+
+    def test_lazy_tuples_and_pickle_persistence(self):
+        import pickle
+
+        nzo = NzbObject("test_lazy")
+        nzf = NzbFile(datetime.now(), "test_file", [("art-1@example.com", 1000, 1, 5)], 1000, nzo)
+        assert nzf.decodetable[0].part_number == 1
+        assert nzf.decodetable[0].segment_index == 5
+
+        data = pickle.dumps(nzf)
+        restored = pickle.loads(data)
+        assert restored.decodetable[0].part_number == 1
+        assert restored.decodetable[0].segment_index == 5
+
+    def test_clean_nzb_tuples_with_none_segment_index(self):
+        nzo = NzbObject("test_clean")
+        nzf = NzbFile(datetime.now(), "test_file", [], 0, nzo)
+        art = nzf.add_article(("art-clean@example.com", 5000, 3))
+        assert art.part_number == 3
+        assert art.segment_index is None
+
+    def test_c2_06_nzbfile_and_article_unpickle_safe_none_and_lock_rebind(self):
+        import pickle
+        from sabnzbd.nzb import Article
+
+        nzo = NzbObject("test_c2_06")
+        nzf = NzbFile(datetime.now(), "test_file", [], 0, nzo)
+        state = nzf.__getstate__()
+        state["articles"] = None
+        state["decodetable"] = None
+
+        restored_nzf = NzbFile.__new__(NzbFile)
+        restored_nzf.__setstate__(state)
+        assert restored_nzf.articles == {}
+        assert restored_nzf.decodetable == []
+        assert restored_nzf.lock is not None
+
+        art = Article("art@example.com", 100, None)
+        restored_art: Article = pickle.loads(pickle.dumps(art))
+        assert restored_art.lock is not None
+
+    def test_c2_07_nzo_attribute_saver_preserves_yenc_encrypted(self, tmp_path):
+        import os
+        from sabnzbd.nzb.object import NzoAttributeSaver
+        import sabnzbd.cfg as cfg
+
+        assert "yenc_encrypted" in NzoAttributeSaver
+
+        cfg.download_dir.set(str(tmp_path))
+
+        nzo = NzbObject("test_c2_07")
+        os.makedirs(nzo.admin_path, exist_ok=True)
+        nzo.yenc_encrypted = True
+        nzo.password = "canary_pw"
+
+        nzo.save_attribs()
+
+        nzo2 = NzbObject("test_c2_07")
+        assert nzo2.yenc_encrypted is False
+        nzo2.load_attribs()
+        assert nzo2.yenc_encrypted is True
+        assert nzo2.password == "canary_pw"

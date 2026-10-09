@@ -33,6 +33,20 @@ import nacl.bindings as nb
 BOOTSTRAP_PREFIX_LEN = 20
 
 
+def index_is_forbidden(index: int) -> bool:
+    """Return True if uint32_be representation of index contains 0x0A or 0x0D (CR-02 / VEC-07)."""
+    be = index.to_bytes(4, "big")
+    return (0x0A in be) or (0x0D in be)
+
+
+def next_permitted_index(candidate: int) -> int:
+    """Advance candidate forward to next permitted segmentIndex skipping 0x0A and 0x0D bytes."""
+    idx = max(1, candidate)
+    while index_is_forbidden(idx):
+        idx += 1
+    return idx
+
+
 class YEncEncryptionStructuralError(ValueError):
     """Structural yEnc-encryption metadata failure (missing/empty password, unsupported mode).
 

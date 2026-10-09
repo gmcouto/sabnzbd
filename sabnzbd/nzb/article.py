@@ -138,7 +138,10 @@ class Article(TryList):
         self.crc32: Optional[int] = None
         self.nzf: sabnzbd.nzb.NzbFile = nzf  # NzbFile reference
         # Share NzbFile lock for file-wide atomicity of try-list ops
-        self.lock: threading.RLock = nzf.lock
+        if nzf and hasattr(nzf, "lock") and nzf.lock is not None:
+            self.lock: threading.RLock = nzf.lock
+        else:
+            self.lock: threading.RLock = threading.RLock()
         self.part_number: Optional[int] = part_number
         self.segment_index: Optional[int] = segment_index
 
