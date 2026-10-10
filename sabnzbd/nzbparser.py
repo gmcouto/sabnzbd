@@ -518,8 +518,7 @@ def nzbfile_parser(full_nzb_path: str, nzo, force_encrypted: bool = False):
                 element.clear()
 
         # Determine encryption mode. Segment identity lives solely in the per-article
-        # bootstrap bytes (Line 1) per Standard v1.2 - readers MUST NOT consume legacy
-        # segment-index XML attributes, so no such parsing or inference happens here.
+        # bootstrap bytes (Line 1) per Standard v1.2, so none is derived from the NZB here.
         explicit_yenc = any(v.lower() == "true" for v in nzo.meta.get("yenc_encrypted", []))
         is_encrypted = (
             force_encrypted

@@ -89,8 +89,8 @@ class TestNzbFile:
 
         assert [f.filename for f in files1] == [f.filename for f in files2]
 
-    def test_legacy_and_structured_lazy_tuples(self):
-        """add_article accepts both legacy (id, size) and structured (id, size, part, index) tuples."""
+    def test_lazy_tuples_with_and_without_part_number(self):
+        """add_article accepts both (id, size) and (id, size, part) tuples."""
         nzo = NzbObject("test_tuples")
         nzf = NzbFile(
             date=datetime.now(),
@@ -100,22 +100,19 @@ class TestNzbFile:
             nzo=nzo,
             file_ordinal=1,
             total_files=1,
-            segment_index_base=1,
         )
 
-        # Legacy 2-tuple
-        art_legacy = nzf.add_article(("legacy_msg@test", 500))
-        assert art_legacy.article == "legacy_msg@test"
-        assert art_legacy.bytes == 500
-        assert art_legacy.part_number is None
-        assert art_legacy.segment_index is None
+        art_plain = nzf.add_article(("plain_msg@test", 500))
+        assert art_plain.article == "plain_msg@test"
+        assert art_plain.bytes == 500
+        assert art_plain.part_number is None
+        assert art_plain.segment_index is None
 
-        # Structured 4-tuple
-        art_structured = nzf.add_article(("struct_msg@test", 600, 3, 42))
+        art_structured = nzf.add_article(("struct_msg@test", 600, 3))
         assert art_structured.article == "struct_msg@test"
         assert art_structured.bytes == 600
         assert art_structured.part_number == 3
-        assert art_structured.segment_index == 42
+        assert art_structured.segment_index is None
 
     def test_missing_state_defaults_to_none(self):
         """__setstate__ missing new keys defaults identity fields to None."""
@@ -144,7 +141,6 @@ class TestNzbFile:
         old_nzf_dict = nzf.__getstate__()
         del old_nzf_dict["file_ordinal"]
         del old_nzf_dict["total_files"]
-        del old_nzf_dict["segment_index_base"]
 
         restored_nzf = NzbFile(
             date=datetime.now(),
@@ -156,13 +152,11 @@ class TestNzbFile:
         restored_nzf.__setstate__(old_nzf_dict)
         assert restored_nzf.file_ordinal is None
         assert restored_nzf.total_files is None
-        assert restored_nzf.segment_index_base is None
 
     def test_pickle_round_trip_preserves_identity_and_rebounds_locks(self):
-        """Pickle/admin round trips retain file ordinal, declared part, base, and article segment cache.
+        """Pickle/admin round trips retain file ordinal, declared part, and article segment cache.
 
-        segment_index is a post-decode cache populated from the wire Line-1 bootstrap; it is
-        never derived from NZB XML anymore, but the field and its persistence stay.
+        segment_index is a post-decode cache populated from the wire Line-1 bootstrap.
         """
         nzo = NzbObject("test_pickle")
         nzf = NzbFile(
@@ -208,7 +202,7 @@ class TestNzbFile:
         """3-tuples (mid, size, part) survive disk save_data, load_data, and pickle round trips.
 
         Bootstrap-only identity (Standard v1.2): NZB tuples never carry a segment index;
-        article.segment_index stays as a post-decode cache field only.
+        article.segment_index is only a post-decode cache.
         """
         nzo = NzbObject("test_pickle_identity")
         nzo.yenc_encrypted = True
@@ -243,37 +237,8 @@ class TestNzbFile:
         nzo_restored: NzbObject = pickle.loads(pickle.dumps(nzo))
         assert nzo_restored.yenc_encrypted is True
 
-    def test_clean_nzb_tuples_with_none_segment_index(self):
-        """Clean NZB 4-tuples with segment_index=None survive disk save_data, load_data, and pickle."""
-        nzo = NzbObject("test_clean_nzb_tuples")
-        nzo.yenc_encrypted = True
-        nzf = NzbFile(
-            date=datetime.now(),
-            subject="clean.bin",
-            raw_article_db=[
-                ("clean1@test", 1000, 1, None),
-                ("clean2@test", 1000, 2, None),
-            ],
-            file_bytes=2000,
-            nzo=nzo,
-        )
-        assert nzf.decodetable[0].segment_index is None
-        assert nzf.decodetable[0].part_number == 1
-
-        nzf.finish_import()
-        assert nzf.import_finished
-        assert len(nzf.decodetable) == 2
-        assert nzf.decodetable[1].segment_index is None
-        assert nzf.decodetable[1].part_number == 2
-
-        # Round trip Article
-        art_restored: Article = pickle.loads(pickle.dumps(nzf.decodetable[0]))
-        assert art_restored.article == "clean1@test"
-        assert art_restored.part_number == 1
-        assert art_restored.segment_index is None
-
     def test_c2_06_nzbfile_and_article_unpickle_safe_none_and_lock_rebind(self):
-        """C2-06: NzbFile unpickling tolerates None for articles/decodetable and Article rebinds lock to nzf."""
+        """NzbFile unpickling tolerates None for articles/decodetable and Article rebinds lock to nzf."""
         nzo = NzbObject("test_c2_06")
         nzf = NzbFile(
             date=datetime.now(),
@@ -306,7 +271,7 @@ class TestNzbFile:
         assert restored_nzf.decodetable == []
 
     def test_c2_07_nzo_attribute_saver_preserves_yenc_encrypted(self):
-        """C2-07: NzoAttributeSaver and load_attribs preserve yenc_encrypted across job retry."""
+        """NzoAttributeSaver and load_attribs preserve yenc_encrypted across job retry."""
         from sabnzbd.nzb.object import NzoAttributeSaver
 
         assert "yenc_encrypted" in NzoAttributeSaver

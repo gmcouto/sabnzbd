@@ -241,7 +241,7 @@ class TestDecryptionAdapterContracts:
                 assert pt_line == expected_pt_line, f"Control line mismatch for {vec['id']}"
 
     def test_nonce_and_tweak_vectors(self):
-        """Verify VEC-02: HMAC-SHA256 body nonce and control tweak derivations against nonce_tweak.json."""
+        """Verify HMAC-SHA256 body nonce and control tweak derivations against nonce_tweak.json."""
         vector_dir = _get_test_vector_dir()
         with open(vector_dir / "nonce_tweak.json", "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -558,7 +558,7 @@ class TestDirectWriteGatingAndFailover:
         article.nzf.filename_checked = True
         article.lowest_partnum = False
         # Explicitly plain provenance: MagicMock auto-attributes would otherwise make
-        # _is_yenc_encrypted() truthy and trip the CR-01 plain-article reject.
+        # _is_yenc_encrypted() truthy and trip the Zero-Output Rule plain-article reject.
         article.nzf.nzo.yenc_encrypted = False
         article.yenc_encrypted = False
         article.segment_index = None
@@ -666,7 +666,7 @@ class TestDirectWriteGatingAndFailover:
         res = decoder.decode_yenc(article, resp)
         assert res == bytearray(expected_pt), "Expected decoded data to be authenticated plaintext"
         assert article.decoded_size == len(expected_pt)
-        # T4: ciphertext CRC must not flow into verification paths
+        # Ciphertext CRC must not flow into verification paths
         assert article.crc32 is None
 
     def test_wire_restore_and_authenticated_decode(self):
@@ -730,7 +730,7 @@ class TestDirectWriteGatingAndFailover:
         assert decoded == bytearray(plaintext)
         assert article.decoded_size == len(plaintext)
         assert article.file_size == len(ct)
-        # T4: ciphertext CRC never persisted on encrypted paths
+        # Ciphertext CRC never persisted on encrypted paths
         assert article.crc32 is None
         assert article.nzf.nzo.verify_nzf_filename.called
 
@@ -775,7 +775,7 @@ class TestDirectWriteGatingAndFailover:
         assert article_m.file_size == len(ct) * 2
         assert article_m.data_begin == 0
         assert article_m.data_size == len(ct)
-        # T4: ciphertext CRC never persisted on encrypted paths
+        # Ciphertext CRC never persisted on encrypted paths
         assert article_m.crc32 is None
 
         # 3. Wire CRC failure (corrupted pcrc32 in =yend)
@@ -1182,7 +1182,7 @@ class TestCycle1AdversarialRemediation:
     """Cycle 1 adversarial review remediation regression tests [ADV-SABNZBD-01]."""
 
     def test_c1_01_adapter_key_cache_thread_safety(self):
-        """C1-01: DecryptionAdapter._key_cache thread-safety under concurrent access."""
+        """DecryptionAdapter._key_cache thread-safety under concurrent access."""
         import concurrent.futures
         from sabnzbd.encryption import DecryptionAdapter
 
@@ -1203,7 +1203,7 @@ class TestCycle1AdversarialRemediation:
         assert salt in adapter._key_cache
 
     def test_c1_02_restore_control_lines_header_bounded(self):
-        """C1-02: restore_control_lines bounds header restoration and stops at =yencryption."""
+        """restore_control_lines bounds header restoration and stops at =yencryption."""
         from sabnzbd.encryption import DecryptionAdapter
 
         adapter = DecryptionAdapter(password="test123")
@@ -1246,7 +1246,7 @@ class TestCycle1AdversarialRemediation:
         assert out_idx == seg_idx
 
     def test_c1_03_decoder_adapter_cached_on_nzo(self):
-        """C1-03: _get_decryption_adapter caches DecryptionAdapter on nzo to eliminate churn."""
+        """_get_decryption_adapter caches DecryptionAdapter on nzo to eliminate churn."""
         import threading
         import sabnzbd.decoder as decoder
         from sabnzbd.encryption import DecryptionAdapter
@@ -1275,7 +1275,7 @@ class TestCycle1AdversarialRemediation:
         assert mock_nzo._decryption_adapter is adapter1
 
     def test_c1_04_direct_write_sink_leakage_fails_closed(self):
-        """C1-04: Direct-write sink on encrypted article raises SinkFailed and fails closed."""
+        """Direct-write sink on encrypted article raises SinkFailed and fails closed."""
         import sabctools
         import sabnzbd.decoder as decoder
         from sabnzbd.decoder import SinkFailed
@@ -1324,14 +1324,14 @@ class TestCycle1AdversarialRemediation:
             mock_queue.register_article.assert_called_with(article, False)
 
     def test_c1_06_dual_index_mismatch_in_body_encrypted_article(self):
-        """C1-06: Dual index mismatch between NZB segment_index and wire header raises ValueError."""
+        """Dual index mismatch between the cached segment_index and the wire header raises ValueError."""
         import sabctools
         import sabnzbd.decoder as decoder
 
         article = mock.MagicMock(spec=Article)
         article.article = "mismatch@dual"
         article.nzf.nzo.password = "test123"
-        article.segment_index = 1  # From NZB
+        article.segment_index = 1  # Cached by a prior decode attempt
 
         response = mock.MagicMock(spec=sabctools.NNTPResponse)
         response.sink_failed = False
@@ -1350,7 +1350,7 @@ class TestCycle1AdversarialRemediation:
             decoder.decode_yenc(article, response)
 
     def test_c1_07_bad_data_zero_output_guarantee(self):
-        """C1-07: BadData on encrypted article discards data and preserves zero-output guarantee."""
+        """BadData on encrypted article discards data and preserves zero-output guarantee."""
         import sabctools
         import sabnzbd.decoder as decoder
         from sabnzbd.decoder import BadData
@@ -1379,7 +1379,7 @@ class TestCycle1AdversarialRemediation:
             mock_queue.register_article.assert_called_with(article, False)
 
     def test_c1_08_split_lines_preserving_endings(self):
-        """C1-08: split_lines_preserving_endings handles unterminated and empty inputs cleanly."""
+        """split_lines_preserving_endings handles unterminated and empty inputs cleanly."""
         from sabnzbd.encryption import split_lines_preserving_endings
 
         # Unterminated trailing line
@@ -1393,7 +1393,7 @@ class TestCycle1AdversarialRemediation:
         assert split_lines_preserving_endings(b"") == []
 
     def test_in03_r4_split_lines_sub_bootstrap_non_y_input(self):
-        """IN-03-R4: sub-BOOTSTRAP_PREFIX_LEN non-'=y' input is one truncated Line 1 (Rust parity)."""
+        """Sub-BOOTSTRAP_PREFIX_LEN non-'=y' input is one truncated Line 1 (Rust parity)."""
         from sabnzbd.encryption import BOOTSTRAP_PREFIX_LEN, split_lines_preserving_endings
 
         # A 0x0A inside the (missing) 20-byte prefix must NOT fragment Line 1.
@@ -1415,7 +1415,7 @@ class TestCycle1AdversarialRemediation:
         assert lines2[0] == raw2
 
     def test_c2_01_restore_control_lines_min_lines_truncated(self):
-        """C2-01: restore_control_lines rejects truncated blocks below min line count."""
+        """restore_control_lines rejects truncated blocks below min line count."""
         from sabnzbd.encryption import DecryptionAdapter
 
         adapter = DecryptionAdapter(password="testpass")
@@ -1433,7 +1433,7 @@ class TestCycle1AdversarialRemediation:
             adapter.restore_control_lines(truncated_single, seg_idx)
 
     def test_c2_02_restore_control_lines_strict_sequence(self):
-        """C2-02: restore_control_lines strictly validates header sequence and missing =yencryption."""
+        """restore_control_lines strictly validates header sequence and missing =yencryption."""
         from sabnzbd.encryption import DecryptionAdapter
 
         adapter = DecryptionAdapter(password="testpass")
@@ -1474,7 +1474,7 @@ class TestCycle1AdversarialRemediation:
             adapter.restore_control_lines(bad_multi, seg_idx)
 
     def test_c2_03_restore_control_lines_trailing_blank_lines(self):
-        """C2-03: restore_control_lines handles trailing blank lines after footer without crashing."""
+        """restore_control_lines handles trailing blank lines after footer without crashing."""
         from sabnzbd.encryption import DecryptionAdapter
 
         adapter = DecryptionAdapter(password="testpass")
@@ -1509,7 +1509,7 @@ class TestCycle1AdversarialRemediation:
         assert out_idx == seg_idx
 
     def test_c2_04_extract_bootstrap_line1_max_length(self):
-        """C2-04: extract_bootstrap_from_line1 enforces upper bound on line 1 length."""
+        """extract_bootstrap_from_line1 enforces upper bound on line 1 length."""
         from sabnzbd.encryption import extract_bootstrap_from_line1
 
         salt = b"\x05" * 16
@@ -1528,7 +1528,7 @@ class TestCycle1AdversarialRemediation:
             extract_bootstrap_from_line1(line_too_long)
 
     def test_c2_05_decoder_dual_index_mismatch_fails_closed(self):
-        """C2-05: decode_article fails closed when NZB segment_index disagrees with wire index."""
+        """decode_article fails closed when the cached segment_index disagrees with the wire index."""
         import sabctools
         import sabnzbd.decoder as decoder
         from sabnzbd.encryption import DecryptionAdapter
@@ -1557,7 +1557,7 @@ class TestCycle1AdversarialRemediation:
         wire_line3 = ct3
 
         mock_article = mock.MagicMock(spec=Article)
-        mock_article.segment_index = 1  # NZB claims 1, wire has 2
+        mock_article.segment_index = 1  # Cached 1, wire has 2
         mock_article.password = "testpass"
         mock_article.nzf.nzo.password = "testpass"
         mock_article.nzf.nzo.yenc_encrypted = True
@@ -1572,7 +1572,7 @@ class TestCycle1AdversarialRemediation:
             decoder.decode_yenc(mock_article, mock_response)
 
     def test_c3_02_wire_crc_error_raises_valueerror_for_encrypted_article(self):
-        """C3-02: decode_yenc raises ValueError on CRC error for encrypted article without saving BadData."""
+        """decode_yenc raises ValueError on CRC error for encrypted article without saving BadData."""
         import sabctools
         import sabnzbd.decoder as decoder
 
@@ -1595,13 +1595,13 @@ class TestCycle1AdversarialRemediation:
         response.yencryption = None
         response.lines = None
 
-        # CR-01: no =yencryption on the wire for a declared-encrypted release means the
+        # Zero-Output Rule: no =yencryption on the wire for a declared-encrypted release means the
         # article was substituted with a plain one - rejected before the CRC block.
         with pytest.raises(ValueError, match="UNAUTHENTICATED_ARTICLE"):
             decoder.decode_yenc(article, response)
 
     def test_c3_03_baddata_discard_on_standalone_article(self):
-        """C3-03: BadData on standalone article with article.yenc_encrypted discards data."""
+        """BadData on standalone article with article.yenc_encrypted discards data."""
         import sabctools
         import sabnzbd.decoder as decoder
         from sabnzbd.decoder import BadData
@@ -1632,7 +1632,7 @@ class TestCycle1AdversarialRemediation:
 
 
 class TestVectorVendoring:
-    """T11: vendored canonical test vectors stay byte-identical to the manifest."""
+    """Vendored canonical test vectors stay byte-identical to the manifest."""
 
     def test_manifest_sha256_drift_check(self):
         """SHA-256 of every vendored vector file must match manifest.json (nyuu malformed_inputs.js pattern)."""
@@ -1652,7 +1652,7 @@ class TestVectorVendoring:
             assert digest == entry["sha256"], f"Drift detected in {file_name}: vendored copy differs from manifest"
 
     def test_index_allocation_vectors(self):
-        """Vendored index_allocation.json (VEC-07) carries the 4 CR-02 skip vectors."""
+        """Vendored index_allocation.json carries the 4 index framing rule skip vectors."""
         vector_dir = _get_test_vector_dir()
         with open(vector_dir / "index_allocation.json", "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -1667,7 +1667,7 @@ class TestVectorVendoring:
             assert assigned > vec["candidate_index"]
 
     def test_malformed_inputs_schema_invariants(self):
-        """VEC-05 schema invariants over malformed_inputs.json (TREE 2 test_conformance_vectors port).
+        """Schema invariants over malformed_inputs.json (TREE 2 test_conformance_vectors port).
 
         Complements test_malformed_inputs_matrix (which dispatches every vector through
         the actual parsers) by pinning the fixture-level taxonomy: stable vector count,
@@ -1725,15 +1725,15 @@ class TestVectorVendoring:
             assert vector["provider_failover_permitted"] is False
 
     def test_nzb_meta_tag_expectations(self):
-        """VEC-06: encrypted NZBs carry yenc_encrypted + password meta; plain NZBs don't."""
+        """Encrypted NZBs carry yenc_encrypted + password meta; plain NZBs don't."""
         vector_dir = _get_test_vector_dir()
         with open(vector_dir / "nzb_segment_identity.json", "r", encoding="utf-8") as f:
             vectors = json.load(f)["vectors"]
-        assert len(vectors) == 33
+        assert len(vectors) == 10
 
         encrypted = [v for v in vectors if v.get("is_encrypted")]
         unencrypted = [v for v in vectors if v.get("is_encrypted") is False]
-        assert len(unencrypted) == 2
+        assert len(unencrypted) == 1
 
         for vector in encrypted:
             nzb_xml = vector["nzb_xml"]
@@ -1744,14 +1744,11 @@ class TestVectorVendoring:
             nzb_xml = vector["nzb_xml"]
             assert '<meta type="yenc_encrypted">' not in nzb_xml, vector["id"]
             assert '<meta type="password">' not in nzb_xml, vector["id"]
-            # Unencrypted releases keep valid identity with no segmentIndex.
             assert vector["expected_valid"] is True
-            for segment in vector["expected_segments"]:
-                assert segment["segment_index"] is None
 
 
 class TestDotUnstuffing:
-    """T9: dot-stuffing transport boundary (RFC 3977 §3.1.1) for encrypted Line 1."""
+    """Dot-stuffing transport boundary (RFC 3977 §3.1.1) for encrypted Line 1."""
 
     def test_sabctools_unstuffing_boundary_probe(self):
         """Boundary probe: sabctools unstuffs yEnc DATA lines but preserves '..' on non-yEnc lines.
@@ -1841,7 +1838,7 @@ class TestDotUnstuffing:
 
 
 class TestUnauthenticatedPlainArticle:
-    """CR-01 / Zero-Output Rule: plain article under a declared-encrypted release is rejected."""
+    """Zero-Output Rule: plain article under a declared-encrypted release is rejected."""
 
     def _plain_response(self):
         import sabctools
@@ -2039,7 +2036,7 @@ class TestUnauthenticatedPlainArticle:
 
 
 class TestStructuralNoPasswordEncryptedWire:
-    """WR-05: encrypted wire with no resolvable password raises structural error, never on_disk."""
+    """Encrypted wire with no resolvable password raises structural error, never on_disk."""
 
     def test_encrypted_wire_no_password_raises_structural(self):
         import sabctools
@@ -2081,7 +2078,7 @@ class TestStructuralNoPasswordEncryptedWire:
             assert not article.on_disk
 
     def test_wr05_r4_authenticated_empty_segment_counts_as_decoded(self):
-        """WR-05-R4: an authenticated zero-length plaintext is decoded/complete —
+        """An authenticated zero-length plaintext is decoded/complete —
         it must never be marked on_disk with zero bytes written."""
         import sabctools
         import sabnzbd.decoder as decoder
@@ -2133,7 +2130,7 @@ class TestStructuralNoPasswordEncryptedWire:
 
 
 class TestHeaderRegionFailClosed:
-    """WR-02 + IN-01: fail-closed header-region FF1 error; byte-exact reconstruction (no lstrip masking)."""
+    """Fail-closed header-region FF1 error; byte-exact reconstruction (no lstrip masking)."""
 
     def _wire_block(self, adapter, salt, seg_idx, corrupt_line2=False):
         master_key = adapter.get_master_key(salt)
@@ -2164,7 +2161,7 @@ class TestHeaderRegionFailClosed:
         return wire_line1 + wire_line2 + data_line + wire_footer
 
     def test_ff1_error_on_header_line_raises_provider_failover(self):
-        """WR-02: FF1 error on a header-region line raises PROVIDER_FAILOVER, never data-line passthrough."""
+        """FF1 error on a header-region line raises PROVIDER_FAILOVER, never data-line passthrough."""
         from sabnzbd.encryption import DecryptionAdapter
 
         adapter = DecryptionAdapter(password="testpass")
@@ -2194,7 +2191,7 @@ class TestHeaderRegionFailClosed:
             pytest.fail("Expected PROVIDER_FAILOVER ValueError")
 
     def test_extract_and_remove_yencryption_byte_exact(self):
-        """IN-01: leading whitespace is no longer masked - reconstruction is byte-exact (pesto aligned)."""
+        """Leading whitespace is no longer masked - reconstruction is byte-exact (pesto aligned)."""
         from sabnzbd.encryption import extract_and_remove_yencryption
 
         valid_hdr = b"=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=0cd77ce245a654463f90b945b1d22d5b"
@@ -2216,7 +2213,7 @@ class TestHeaderRegionFailClosed:
 
 
 class TestDecodeTimeStructuralAbort:
-    """F3.1: decode-time structural errors end the job immediately, not after retry exhaustion."""
+    """Decode-time structural errors end the job immediately, not after retry exhaustion."""
 
     def _structural_article(self):
         import sabctools
@@ -2252,7 +2249,7 @@ class TestDecodeTimeStructuralAbort:
         return article, response
 
     def test_decode_time_structural_error_ends_job_immediately(self):
-        """F3.1: decode() routes the structural failure to NzbQueue.end_job in the same call."""
+        """decode() routes the structural failure to NzbQueue.end_job in the same call."""
         import sabnzbd.decoder as decoder
         from sabnzbd.encryption import YEncEncryptionStructuralError
 
@@ -2278,7 +2275,7 @@ class TestDecodeTimeStructuralAbort:
             assert article.nzf.nzo.fail_msg
 
     def test_decode_time_structural_error_skips_end_job_when_already_ended(self):
-        """F3.1: when register_article already completed the job, no second end_job is issued."""
+        """When register_article already completed the job, no second end_job is issued."""
         import sabnzbd.decoder as decoder
         from sabnzbd.encryption import YEncEncryptionStructuralError
 
@@ -2297,7 +2294,7 @@ class TestDecodeTimeStructuralAbort:
             mock_queue.register_article.assert_called_once_with(article, False)
 
     def test_decode_time_structural_error_without_queue_defers(self, caplog):
-        """F3.1: with no queue initialized (tooling), the abort is deferred, not crashed on."""
+        """With no queue initialized (tooling), the abort is deferred, not crashed on."""
         import logging
 
         import sabnzbd.decoder as decoder
@@ -2316,7 +2313,7 @@ class TestDecodeTimeStructuralAbort:
 
 
 class TestCryptoErrorRetryTier:
-    """F3.2: only YEncEncryptionCryptoError is retried as provider corruption; plain ValueError is not."""
+    """Only YEncEncryptionCryptoError is retried as provider corruption; plain ValueError is not."""
 
     def test_crypto_error_is_retryable_and_value_error_is_not(self, caplog):
         import sabctools

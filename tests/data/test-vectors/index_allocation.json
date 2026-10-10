@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0",
   "requirement": "VEC-07",
-  "description": "Uploader segmentIndex allocation skip vectors (CR-02): a candidate index whose uint32_be encoding contains 0x0A or 0x0D is forbidden; uploaders MUST skip to the next permitted index. Kept out of nzb_segment_identity.json (whose 33 NZB-shaped vectors have fixed-count consumers); each downstream consumer vendors this file and adds its own loader/dispatch.",
+  "description": "Uploader segmentIndex allocation skip vectors: a candidate index whose uint32_be encoding contains 0x0A or 0x0D is forbidden; uploaders MUST skip to the next permitted index.",
   "vectors": [
     {
       "id": "index-allocation-01-skip-10",

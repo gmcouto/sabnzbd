@@ -84,11 +84,10 @@ class TestNzbParser:
         with open(vectors_path, encoding="utf-8") as vectors_file:
             vectors = json.load(vectors_file)["vectors"]
 
-        assert len(vectors) == 33
+        assert len(vectors) == 10
 
         for vector in vectors:
             vector_id = vector["id"]
-            category = vector["category"]
             nzb_file = _write_nzb_gz(SAB_CACHE_DIR, f"test_{vector_id}", vector["nzb_xml"])
             nzo = NzbObject(f"job_{vector_id}")
 
@@ -96,19 +95,16 @@ class TestNzbParser:
             for nzf in nzo.files:
                 nzf.finish_import()
 
-            # Bootstrap-only identity: NZB segment identity never comes from XML
-            # attributes, so every vector's articles carry segment_index=None here;
-            # the wire Line-1 bootstrap governs at decode time.
-            assert all(art.segment_index is None for nzf in nzo.files for art in nzf.decodetable)
+            articles = [art for nzf in nzo.files for art in nzf.decodetable]
+            # Segment identity lives only in the article bootstrap bytes (Standard v1.2),
+            # so nothing about it is known at NZB ingest.
+            assert all(art.segment_index is None for art in articles), vector_id
+            assert nzo.yenc_encrypted is (vector["category"] != "unencrypted_compatibility"), vector_id
 
-            if category in ("invalid_identity", "unencrypted_compatibility"):
-                assert nzo.yenc_encrypted is False
-                continue
-
-            # Legacy segmentIndex attributes are ignored per Standard v1.2 (readers
-            # MUST NOT consume them), so even vectors with malformed attributes parse
-            # cleanly whenever the explicit yenc_encrypted meta is present.
-            assert nzo.yenc_encrypted is True
+            if expected_segments := vector.get("expected_segments"):
+                parsed = sorted((art.article, art.part_number, art.bytes) for art in articles)
+                expected = sorted((seg["message_id"], seg["part"], seg["bytes"]) for seg in expected_segments)
+                assert parsed == expected, vector_id
 
     @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
     def test_separate_yenc_and_archive_passwords(self):
@@ -214,7 +210,7 @@ class TestNzbParser:
 
 @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
 def test_index_allocation_conformance():
-    """Dedicated loader/dispatch for the vendored index_allocation.json (VEC-07, CR-02).
+    """Dedicated loader/dispatch for the vendored index_allocation.json (index framing rule).
 
     These vectors describe uploader-side index allocation and are NOT NZB-shaped, so they
     are asserted directly on allocation schema rather than routed through nzbfile_parser.
@@ -238,13 +234,13 @@ def test_index_allocation_conformance():
             if forbidden:
                 assert assigned > candidate
             assigned_bytes = assigned.to_bytes(4, "big")
-            assert not any(b in (0x0A, 0x0D) for b in assigned_bytes), "assigned index must be CR-02-safe"
+            assert not any(b in (0x0A, 0x0D) for b in assigned_bytes), "assigned index violates the framing rule"
             assert assigned_bytes.hex() == vec["expected_index_hex"]
 
 
 @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
 def test_subject_prefix_file_ordinal_extraction():
-    """F3.3: [N/M] subject prefix is extracted into structured nzf.file_ordinal/total_files."""
+    """[N/M] subject prefix is extracted into structured nzf.file_ordinal/total_files."""
     plain_xml = """<?xml version="1.0" encoding="utf-8"?>
 <nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
  <head><meta type="password">pw</meta></head>

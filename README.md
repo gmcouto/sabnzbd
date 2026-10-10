@@ -51,13 +51,13 @@ Our many other command line options are explained in depth [here](https://sabnzb
 ## yEnc Header and Body Decryption
 
 SABnzbd supports downloading releases protected by yEnc body and control-line encryption
-(XChaCha20-Poly1305 and Radix 253 FF1) conforming to the experimental v1.1 Self-Describing
+(XChaCha20-Poly1305 and Radix 253 FF1) conforming to the experimental v1.2 Self-Describing
 Article Bootstrap Standard.
 
 - **Self-Describing Article Wire Bootstrap**: Downloader extracts the 16-byte raw salt and uint32_be
   `segmentIndex` from the 20-byte Line 1 prefix (`[16B salt][4B uint32_be(segmentIndex)]`) and verifies
   dual-bootstrap cross-header agreement against the canonical 5-token `=yencryption` header line.
-- **Clean Standard NZB 1.1 Support**: Encrypted NZBs conform strictly to standard NZB 1.1 XML containing
+- **Standard NZB 1.1 Support**: Encrypted NZBs conform strictly to standard NZB 1.1 XML containing
   only `<meta type="yenc_encrypted">true</meta>` and `<meta type="password">` in `<head>`, without
   custom segment attributes.
 - **Automatic Decryption**: Encrypted releases containing `<meta type="yenc_encrypted">true</meta>` and

@@ -244,7 +244,7 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
         if search_new_server(article):
             return
 
-    # WR-05-R4: distinguish "nothing produced" (None — streamed straight to disk
+    # Distinguish "nothing produced" (None — streamed straight to disk
     # or no decode happened) from "produced empty" (an authenticated zero-length
     # plaintext, which the encrypted-wire path legitimately yields for empty
     # segments). An empty-but-complete article must count as decoded, never fall
@@ -294,7 +294,7 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
     if not password and hasattr(article, "password"):
         password = article.password
 
-    # WR-05 defense-in-depth (structural tier): an encrypted-wire article (sabctools
+    # Defense-in-depth (structural tier): an encrypted-wire article (sabctools
     # decoded nothing) in a declared-encrypted release with NO resolvable password is
     # a structural metadata failure - missing password aborts the job and the article
     # is never marked on_disk, so zero plaintext or ciphertext is ever released.
@@ -387,7 +387,7 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
         article.data_begin = sub_resp.part_begin
         article.data_size = sub_resp.part_size
         article.decoded_size = len(decoded_data)
-        # T4: never persist the ciphertext CRC into any verification path. The wire CRC
+        # Never persist the ciphertext CRC into any verification path. The wire CRC
         # covers ciphertext, not plaintext; PAR2 verifies the authenticated plaintext.
         article.crc32 = None
         nzf.type = "yenc"
@@ -471,10 +471,10 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
             article.segment_index = segment_index
         decoded_data = bytearray(plaintext)
         article.decoded_size = len(decoded_data)
-        # T4: ciphertext CRC must not flow into any verification path
+        # Ciphertext CRC must not flow into any verification path
         article.crc32 = None
 
-    # CR-01 / Zero-Output Rule (third enforcement site of the single shared rule, alongside
+    # Zero-Output Rule (third enforcement site of the single shared rule, alongside
     # pesto adapter.rs and nzbget ArticleDownloader.cpp): a release declared yEnc-encrypted
     # must never accept a plain (never-authenticated) article. A substituted article is
     # provider corruption - retriable tier per Control Std v1.2 §5 step 4b - so this raises
@@ -508,7 +508,7 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
         # bytes stay put either way, so par2 has the same chance of repairing it
         raise BadData(decoded_data)
 
-    # T4: on encrypted paths the wire CRC covers ciphertext - never persist it into
+    # On encrypted paths the wire CRC covers ciphertext - never persist it into
     # any verification path (PAR2, quick-check, whole-file CRC folding)
     article.crc32 = None if parsed_enc else crc
 

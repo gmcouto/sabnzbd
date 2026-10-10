@@ -57,7 +57,7 @@ class YEncEncryptionCryptoError(ValueError):
 
 
 def byte_to_numeral(b: int) -> int:
-    """Map byte octet to numeral 0..252 per yEnc Control Lines Standard v1.0."""
+    """Map byte octet to numeral 0..252 per yEnc Control Lines Standard v1.2."""
     if 0x01 <= b <= 0x09:
         return b - 1
     elif b == 0x0B:
@@ -70,7 +70,7 @@ def byte_to_numeral(b: int) -> int:
 
 
 def numeral_to_byte(i: int) -> int:
-    """Map numeral 0..252 back to byte octet per yEnc Control Lines Standard v1.0."""
+    """Map numeral 0..252 back to byte octet per yEnc Control Lines Standard v1.2."""
     if 0 <= i <= 8:
         return i + 1
     elif i == 9:
@@ -276,7 +276,7 @@ def parse_yencryption_line(line: str | bytes) -> Optional[dict[str, Any]]:
     idx_bytes = struct.pack(">I", segment_index)
     if b"\x0a" in idx_bytes or b"\x0d" in idx_bytes:
         raise YEncEncryptionCryptoError(
-            f"FORBIDDEN_SEGMENT_INDEX_BYTE: segment index {segment_index} contains 0x0A or 0x0D (CR-02)"
+            f"FORBIDDEN_SEGMENT_INDEX_BYTE: segment index {segment_index} contains 0x0A or 0x0D"
         )
 
     try:
@@ -370,7 +370,7 @@ def extract_bootstrap_from_line1(line1: bytes) -> tuple[bytes, int]:
     if segment_index == 0:
         raise YEncEncryptionCryptoError("ZERO_SEGMENT_INDEX: segment index cannot be zero")
     if any(b in (0x0A, 0x0D) for b in line1[16:20]):
-        # CR-02: a 0x0A/0x0D inside the index bytes splits Line 1 on the wire
+        # Index framing rule: a 0x0A/0x0D inside the index bytes splits Line 1 on the wire
         raise YEncEncryptionCryptoError("FORBIDDEN_SEGMENT_INDEX_BYTE: segment index bytes contain 0x0A or 0x0D")
     return salt, segment_index
 
@@ -401,7 +401,7 @@ def split_lines_preserving_endings(input_bytes: bytes) -> list[bytes]:
             if total >= BOOTSTRAP_PREFIX_LEN:
                 pos += BOOTSTRAP_PREFIX_LEN
             else:
-                # IN-03-R4: match Rust (control.rs split_lines_preserving_endings)
+                # Match Rust (control.rs split_lines_preserving_endings)
                 # — input too short to carry the 20-byte bootstrap prefix is
                 # treated as one truncated Line 1 so a stray 0x0A inside the
                 # (missing) prefix cannot fragment it; both clients then report
@@ -588,7 +588,7 @@ class DecryptionAdapter:
                 try:
                     pt = self.decrypt_control_line(content, enc_key, tweak)
                 except YEncEncryptionCryptoError as e:
-                    # WR-02 fail-closed (Control Std v1.2 §5 step 4a): only decryption
+                    # Fail-closed (Control Std v1.2 §5 step 4a): only decryption
                     # SUCCESS yielding non-=y content terminates the header loop (first
                     # data line). An FF1 error on an expected header line is retriable
                     # provider corruption - the raw wire line is never passed through

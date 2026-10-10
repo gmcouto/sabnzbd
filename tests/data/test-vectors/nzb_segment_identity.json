@@ -6,7 +6,7 @@
     {
       "id": "nzb-valid-01-basic-sequential",
       "category": "valid_identity",
-      "description": "Standard two-file release with sequential segmentIndex 1..3 across files",
+      "description": "Standard two-file encrypted release parsed as plain NZB 1.1 segments",
       "expected_valid": true,
       "is_encrypted": true,
       "nzb_xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <head>\n    <meta type=\"password\">test123</meta>\n    <meta type=\"yenc_encrypted\">true</meta>\n  </head>\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"[1/2] - &quot;file1.bin&quot; yEnc (1/2)\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"1\">art-1@example.com</segment>\n      <segment bytes=\"750000\" number=\"2\">art-2@example.com</segment>\n    </segments>\n  </file>\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"[2/2] - &quot;file2.bin&quot; yEnc (1/1)\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"500000\" number=\"1\">art-3@example.com</segment>\n    </segments>\n  </file>\n</nzb>",
@@ -14,20 +14,17 @@
         {
           "message_id": "art-1@example.com",
           "part": 1,
-          "bytes": 750000,
-          "segment_index": 1
+          "bytes": 750000
         },
         {
           "message_id": "art-2@example.com",
           "part": 2,
-          "bytes": 750000,
-          "segment_index": 2
+          "bytes": 750000
         },
         {
           "message_id": "art-3@example.com",
           "part": 1,
-          "bytes": 500000,
-          "segment_index": 3
+          "bytes": 500000
         }
       ]
     },
@@ -42,14 +39,12 @@
         {
           "message_id": "art-arb-1@example.com",
           "part": 1,
-          "bytes": 750000,
-          "segment_index": 1
+          "bytes": 750000
         },
         {
           "message_id": "art-arb-2@example.com",
           "part": 1,
-          "bytes": 500000,
-          "segment_index": 2
+          "bytes": 500000
         }
       ]
     },
@@ -64,21 +59,19 @@
         {
           "message_id": "art-obf-1@example.com",
           "part": 1,
-          "bytes": 750000,
-          "segment_index": 1
+          "bytes": 750000
         },
         {
           "message_id": "art-obf-2@example.com",
           "part": 1,
-          "bytes": 750000,
-          "segment_index": 2
+          "bytes": 750000
         }
       ]
     },
     {
       "id": "nzb-valid-04-misleading-counter",
       "category": "valid_identity",
-      "description": "Subjects containing misleading [99/100] and (5/10) counters while segmentIndex is authoritative",
+      "description": "Subjects containing misleading [99/100] and (5/10) counters have no effect on parsing",
       "expected_valid": true,
       "is_encrypted": true,
       "nzb_xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <head>\n    <meta type=\"password\">test123</meta>\n    <meta type=\"yenc_encrypted\">true</meta>\n  </head>\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"[99/100] - &quot;misleading.bin&quot; yEnc (5/10)\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"1\">art-mis-1@example.com</segment>\n    </segments>\n  </file>\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"[50/100] - &quot;misleading.bin&quot; yEnc (6/10)\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"1\">art-mis-2@example.com</segment>\n    </segments>\n  </file>\n</nzb>",
@@ -86,21 +79,19 @@
         {
           "message_id": "art-mis-1@example.com",
           "part": 1,
-          "bytes": 750000,
-          "segment_index": 1
+          "bytes": 750000
         },
         {
           "message_id": "art-mis-2@example.com",
           "part": 1,
-          "bytes": 750000,
-          "segment_index": 2
+          "bytes": 750000
         }
       ]
     },
     {
       "id": "nzb-valid-05-reordered-files",
       "category": "valid_identity",
-      "description": "XML file elements appearing in reverse order with explicit indices preserved",
+      "description": "XML file elements in reverse order parse without reordering",
       "expected_valid": true,
       "is_encrypted": true,
       "nzb_xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <head>\n    <meta type=\"password\">test123</meta>\n    <meta type=\"yenc_encrypted\">true</meta>\n  </head>\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"[2/2] - &quot;file2.bin&quot; yEnc (1/1)\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"500000\" number=\"1\">art-rf-2@example.com</segment>\n    </segments>\n  </file>\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"[1/2] - &quot;file1.bin&quot; yEnc (1/1)\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"1\">art-rf-1@example.com</segment>\n    </segments>\n  </file>\n</nzb>",
@@ -108,21 +99,19 @@
         {
           "message_id": "art-rf-2@example.com",
           "part": 1,
-          "bytes": 500000,
-          "segment_index": 2
+          "bytes": 500000
         },
         {
           "message_id": "art-rf-1@example.com",
           "part": 1,
-          "bytes": 750000,
-          "segment_index": 1
+          "bytes": 750000
         }
       ]
     },
     {
       "id": "nzb-valid-06-reordered-segments",
       "category": "valid_identity",
-      "description": "XML segment elements within file appearing out of order with explicit indices preserved",
+      "description": "XML segment elements out of order within a file parse without reordering",
       "expected_valid": true,
       "is_encrypted": true,
       "nzb_xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <head>\n    <meta type=\"password\">test123</meta>\n    <meta type=\"yenc_encrypted\">true</meta>\n  </head>\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"[1/1] - &quot;file.bin&quot; yEnc (1/2)\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"2\">art-rs-2@example.com</segment>\n      <segment bytes=\"750000\" number=\"1\">art-rs-1@example.com</segment>\n    </segments>\n  </file>\n</nzb>",
@@ -130,81 +119,19 @@
         {
           "message_id": "art-rs-2@example.com",
           "part": 2,
-          "bytes": 750000,
-          "segment_index": 2
+          "bytes": 750000
         },
         {
           "message_id": "art-rs-1@example.com",
           "part": 1,
-          "bytes": 750000,
-          "segment_index": 1
-        }
-      ]
-    },
-    {
-      "id": "nzb-valid-07-boundary-lower-1",
-      "category": "valid_identity",
-      "description": "Single segment with lower boundary index 1",
-      "expected_valid": true,
-      "is_encrypted": true,
-      "nzb_xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <head>\n    <meta type=\"password\">test123</meta>\n    <meta type=\"yenc_encrypted\">true</meta>\n  </head>\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"&quot;boundary_lower.bin&quot;\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"1\">art-b1@example.com</segment>\n    </segments>\n  </file>\n</nzb>",
-      "expected_segments": [
-        {
-          "message_id": "art-b1@example.com",
-          "part": 1,
-          "bytes": 750000,
-          "segment_index": 1
-        }
-      ]
-    },
-    {
-      "id": "nzb-valid-08-boundary-upper-max-uint32",
-      "category": "valid_identity",
-      "description": "Single segment with upper boundary index 4294967295 (max uint32)",
-      "expected_valid": true,
-      "is_encrypted": true,
-      "nzb_xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <head>\n    <meta type=\"password\">test123</meta>\n    <meta type=\"yenc_encrypted\">true</meta>\n  </head>\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"&quot;boundary_upper.bin&quot;\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"1\">art-bmax@example.com</segment>\n    </segments>\n  </file>\n</nzb>",
-      "expected_segments": [
-        {
-          "message_id": "art-bmax@example.com",
-          "part": 1,
-          "bytes": 750000,
-          "segment_index": 4294967295
-        }
-      ]
-    },
-    {
-      "id": "nzb-valid-09-sparse-indices",
-      "category": "valid_identity",
-      "description": "Segments with non-contiguous sparse indices (1, 5, 100)",
-      "expected_valid": true,
-      "is_encrypted": true,
-      "nzb_xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <head>\n    <meta type=\"password\">test123</meta>\n    <meta type=\"yenc_encrypted\">true</meta>\n  </head>\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"&quot;sparse.bin&quot;\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"1\">art-sp-1@example.com</segment>\n      <segment bytes=\"750000\" number=\"2\">art-sp-5@example.com</segment>\n      <segment bytes=\"750000\" number=\"3\">art-sp-100@example.com</segment>\n    </segments>\n  </file>\n</nzb>",
-      "expected_segments": [
-        {
-          "message_id": "art-sp-1@example.com",
-          "part": 1,
-          "bytes": 750000,
-          "segment_index": 1
-        },
-        {
-          "message_id": "art-sp-5@example.com",
-          "part": 2,
-          "bytes": 750000,
-          "segment_index": 5
-        },
-        {
-          "message_id": "art-sp-100@example.com",
-          "part": 3,
-          "bytes": 750000,
-          "segment_index": 100
+          "bytes": 750000
         }
       ]
     },
     {
       "id": "nzb-valid-10-partial-nzb-subset",
       "category": "valid_identity",
-      "description": "Partial NZB subset containing only file 2 (original segments 3 and 4) retaining original indices without renumbering",
+      "description": "Partial NZB subset containing only file 2 parses without renumbering parts",
       "expected_valid": true,
       "is_encrypted": true,
       "nzb_xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <head>\n    <meta type=\"password\">test123</meta>\n    <meta type=\"yenc_encrypted\">true</meta>\n  </head>\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"[2/3] - &quot;file2.bin&quot; yEnc (1/2)\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"1\">art-sub-3@example.com</segment>\n      <segment bytes=\"750000\" number=\"2\">art-sub-4@example.com</segment>\n    </segments>\n  </file>\n</nzb>",
@@ -212,240 +139,34 @@
         {
           "message_id": "art-sub-3@example.com",
           "part": 1,
-          "bytes": 750000,
-          "segment_index": 3
+          "bytes": 750000
         },
         {
           "message_id": "art-sub-4@example.com",
           "part": 2,
-          "bytes": 750000,
-          "segment_index": 4
+          "bytes": 750000
         }
       ]
     },
     {
-      "id": "nzb-invalid-01-zero-index",
-      "category": "legacy_attribute_ignored",
-      "description": "Legacy custom attribute ignored by clean NZB 1.1 parser: segmentIndex='0' is strictly forbidden",
-      "expected_valid": true,
-      "is_encrypted": true,
-      "legacy_segment_index": "0",
-      "legacy_expected_error": "INVALID_SEGMENT_INDEX_ZERO",
-      "nzb_xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <head>\n    <meta type=\"password\">test123</meta>\n    <meta type=\"yenc_encrypted\">true</meta>\n  </head>\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"&quot;invalid_file.bin&quot;\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"1\">art-nzb-invalid-01-zero-index@example.com</segment>\n    </segments>\n  </file>\n</nzb>"
-    },
-    {
-      "id": "nzb-invalid-02-leading-zero-single",
-      "category": "legacy_attribute_ignored",
-      "description": "Legacy custom attribute ignored by clean NZB 1.1 parser: segmentIndex='01' has prohibited leading zero",
-      "expected_valid": true,
-      "is_encrypted": true,
-      "legacy_segment_index": "01",
-      "legacy_expected_error": "INVALID_SEGMENT_INDEX_LEADING_ZERO",
-      "nzb_xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <head>\n    <meta type=\"password\">test123</meta>\n    <meta type=\"yenc_encrypted\">true</meta>\n  </head>\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"&quot;invalid_file.bin&quot;\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"1\">art-nzb-invalid-02-leading-zero-single@example.com</segment>\n    </segments>\n  </file>\n</nzb>"
-    },
-    {
-      "id": "nzb-invalid-03-leading-zero-multi",
-      "category": "legacy_attribute_ignored",
-      "description": "Legacy custom attribute ignored by clean NZB 1.1 parser: segmentIndex='007' has prohibited leading zeroes",
-      "expected_valid": true,
-      "is_encrypted": true,
-      "legacy_segment_index": "007",
-      "legacy_expected_error": "INVALID_SEGMENT_INDEX_LEADING_ZERO",
-      "nzb_xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <head>\n    <meta type=\"password\">test123</meta>\n    <meta type=\"yenc_encrypted\">true</meta>\n  </head>\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"&quot;invalid_file.bin&quot;\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"1\">art-nzb-invalid-03-leading-zero-multi@example.com</segment>\n    </segments>\n  </file>\n</nzb>"
-    },
-    {
-      "id": "nzb-invalid-04-plus-sign",
-      "category": "legacy_attribute_ignored",
-      "description": "Legacy custom attribute ignored by clean NZB 1.1 parser: segmentIndex='+1' has prohibited plus sign",
-      "expected_valid": true,
-      "is_encrypted": true,
-      "legacy_segment_index": "+1",
-      "legacy_expected_error": "INVALID_SEGMENT_INDEX_SIGN",
-      "nzb_xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <head>\n    <meta type=\"password\">test123</meta>\n    <meta type=\"yenc_encrypted\">true</meta>\n  </head>\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"&quot;invalid_file.bin&quot;\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"1\">art-nzb-invalid-04-plus-sign@example.com</segment>\n    </segments>\n  </file>\n</nzb>"
-    },
-    {
-      "id": "nzb-invalid-05-minus-sign",
-      "category": "legacy_attribute_ignored",
-      "description": "Legacy custom attribute ignored by clean NZB 1.1 parser: segmentIndex='-1' has prohibited minus sign",
-      "expected_valid": true,
-      "is_encrypted": true,
-      "legacy_segment_index": "-1",
-      "legacy_expected_error": "INVALID_SEGMENT_INDEX_SIGN",
-      "nzb_xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <head>\n    <meta type=\"password\">test123</meta>\n    <meta type=\"yenc_encrypted\">true</meta>\n  </head>\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"&quot;invalid_file.bin&quot;\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"1\">art-nzb-invalid-05-minus-sign@example.com</segment>\n    </segments>\n  </file>\n</nzb>"
-    },
-    {
-      "id": "nzb-invalid-06-leading-whitespace",
-      "category": "legacy_attribute_ignored",
-      "description": "Legacy custom attribute ignored by clean NZB 1.1 parser: segmentIndex=' 1' has leading whitespace",
-      "expected_valid": true,
-      "is_encrypted": true,
-      "legacy_segment_index": " 1",
-      "legacy_expected_error": "INVALID_SEGMENT_INDEX_WHITESPACE",
-      "nzb_xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <head>\n    <meta type=\"password\">test123</meta>\n    <meta type=\"yenc_encrypted\">true</meta>\n  </head>\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"&quot;invalid_file.bin&quot;\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"1\">art-nzb-invalid-06-leading-whitespace@example.com</segment>\n    </segments>\n  </file>\n</nzb>"
-    },
-    {
-      "id": "nzb-invalid-07-trailing-whitespace",
-      "category": "legacy_attribute_ignored",
-      "description": "Legacy custom attribute ignored by clean NZB 1.1 parser: segmentIndex='1 ' has trailing whitespace",
-      "expected_valid": true,
-      "is_encrypted": true,
-      "legacy_segment_index": "1 ",
-      "legacy_expected_error": "INVALID_SEGMENT_INDEX_WHITESPACE",
-      "nzb_xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <head>\n    <meta type=\"password\">test123</meta>\n    <meta type=\"yenc_encrypted\">true</meta>\n  </head>\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"&quot;invalid_file.bin&quot;\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"1\">art-nzb-invalid-07-trailing-whitespace@example.com</segment>\n    </segments>\n  </file>\n</nzb>"
-    },
-    {
-      "id": "nzb-invalid-08-internal-whitespace",
-      "category": "legacy_attribute_ignored",
-      "description": "Legacy custom attribute ignored by clean NZB 1.1 parser: segmentIndex='1 2' has internal whitespace",
-      "expected_valid": true,
-      "is_encrypted": true,
-      "legacy_segment_index": "1 2",
-      "legacy_expected_error": "INVALID_SEGMENT_INDEX_WHITESPACE",
-      "nzb_xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <head>\n    <meta type=\"password\">test123</meta>\n    <meta type=\"yenc_encrypted\">true</meta>\n  </head>\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"&quot;invalid_file.bin&quot;\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"1\">art-nzb-invalid-08-internal-whitespace@example.com</segment>\n    </segments>\n  </file>\n</nzb>"
-    },
-    {
-      "id": "nzb-invalid-09-tab-character",
-      "category": "legacy_attribute_ignored",
-      "description": "Legacy custom attribute ignored by clean NZB 1.1 parser: segmentIndex='1\\t' contains tab whitespace",
-      "expected_valid": true,
-      "is_encrypted": true,
-      "legacy_segment_index": "1\t",
-      "legacy_expected_error": "INVALID_SEGMENT_INDEX_WHITESPACE",
-      "nzb_xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <head>\n    <meta type=\"password\">test123</meta>\n    <meta type=\"yenc_encrypted\">true</meta>\n  </head>\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"&quot;invalid_file.bin&quot;\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"1\">art-nzb-invalid-09-tab-character@example.com</segment>\n    </segments>\n  </file>\n</nzb>"
-    },
-    {
-      "id": "nzb-invalid-10-newline-character",
-      "category": "legacy_attribute_ignored",
-      "description": "Legacy custom attribute ignored by clean NZB 1.1 parser: segmentIndex='1\\n' contains newline whitespace",
-      "expected_valid": true,
-      "is_encrypted": true,
-      "legacy_segment_index": "1\n",
-      "legacy_expected_error": "INVALID_SEGMENT_INDEX_WHITESPACE",
-      "nzb_xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <head>\n    <meta type=\"password\">test123</meta>\n    <meta type=\"yenc_encrypted\">true</meta>\n  </head>\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"&quot;invalid_file.bin&quot;\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"1\">art-nzb-invalid-10-newline-character@example.com</segment>\n    </segments>\n  </file>\n</nzb>"
-    },
-    {
-      "id": "nzb-invalid-11-hex-prefix",
-      "category": "legacy_attribute_ignored",
-      "description": "Legacy custom attribute ignored by clean NZB 1.1 parser: segmentIndex='0x01' has non-decimal hex characters",
-      "expected_valid": true,
-      "is_encrypted": true,
-      "legacy_segment_index": "0x01",
-      "legacy_expected_error": "INVALID_SEGMENT_INDEX_NON_DIGIT",
-      "nzb_xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <head>\n    <meta type=\"password\">test123</meta>\n    <meta type=\"yenc_encrypted\">true</meta>\n  </head>\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"&quot;invalid_file.bin&quot;\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"1\">art-nzb-invalid-11-hex-prefix@example.com</segment>\n    </segments>\n  </file>\n</nzb>"
-    },
-    {
-      "id": "nzb-invalid-12-float-decimal",
-      "category": "legacy_attribute_ignored",
-      "description": "Legacy custom attribute ignored by clean NZB 1.1 parser: segmentIndex='1.0' has non-integer decimal point",
-      "expected_valid": true,
-      "is_encrypted": true,
-      "legacy_segment_index": "1.0",
-      "legacy_expected_error": "INVALID_SEGMENT_INDEX_NON_DIGIT",
-      "nzb_xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <head>\n    <meta type=\"password\">test123</meta>\n    <meta type=\"yenc_encrypted\">true</meta>\n  </head>\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"&quot;invalid_file.bin&quot;\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"1\">art-nzb-invalid-12-float-decimal@example.com</segment>\n    </segments>\n  </file>\n</nzb>"
-    },
-    {
-      "id": "nzb-invalid-13-alpha-text",
-      "category": "legacy_attribute_ignored",
-      "description": "Legacy custom attribute ignored by clean NZB 1.1 parser: segmentIndex='one' has alphabetic characters",
-      "expected_valid": true,
-      "is_encrypted": true,
-      "legacy_segment_index": "one",
-      "legacy_expected_error": "INVALID_SEGMENT_INDEX_NON_DIGIT",
-      "nzb_xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <head>\n    <meta type=\"password\">test123</meta>\n    <meta type=\"yenc_encrypted\">true</meta>\n  </head>\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"&quot;invalid_file.bin&quot;\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"1\">art-nzb-invalid-13-alpha-text@example.com</segment>\n    </segments>\n  </file>\n</nzb>"
-    },
-    {
-      "id": "nzb-invalid-14-empty-string",
-      "category": "legacy_attribute_ignored",
-      "description": "Legacy custom attribute ignored by clean NZB 1.1 parser: segmentIndex='' is an empty attribute value",
-      "expected_valid": true,
-      "is_encrypted": true,
-      "legacy_segment_index": "",
-      "legacy_expected_error": "INVALID_SEGMENT_INDEX_EMPTY",
-      "nzb_xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <head>\n    <meta type=\"password\">test123</meta>\n    <meta type=\"yenc_encrypted\">true</meta>\n  </head>\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"&quot;invalid_file.bin&quot;\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"1\">art-nzb-invalid-14-empty-string@example.com</segment>\n    </segments>\n  </file>\n</nzb>"
-    },
-    {
-      "id": "nzb-invalid-15-overflow-max-plus-1",
-      "category": "legacy_attribute_ignored",
-      "description": "Legacy custom attribute ignored by clean NZB 1.1 parser: segmentIndex='4294967296' exceeds 32-bit unsigned integer max",
-      "expected_valid": true,
-      "is_encrypted": true,
-      "legacy_segment_index": "4294967296",
-      "legacy_expected_error": "INVALID_SEGMENT_INDEX_OVERFLOW",
-      "nzb_xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <head>\n    <meta type=\"password\">test123</meta>\n    <meta type=\"yenc_encrypted\">true</meta>\n  </head>\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"&quot;invalid_file.bin&quot;\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"1\">art-nzb-invalid-15-overflow-max-plus-1@example.com</segment>\n    </segments>\n  </file>\n</nzb>"
-    },
-    {
-      "id": "nzb-invalid-16-overflow-large",
-      "category": "legacy_attribute_ignored",
-      "description": "Legacy custom attribute ignored by clean NZB 1.1 parser: segmentIndex='18446744073709551615' exceeds 32-bit unsigned integer max",
-      "expected_valid": true,
-      "is_encrypted": true,
-      "legacy_segment_index": "18446744073709551615",
-      "legacy_expected_error": "INVALID_SEGMENT_INDEX_OVERFLOW",
-      "nzb_xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <head>\n    <meta type=\"password\">test123</meta>\n    <meta type=\"yenc_encrypted\">true</meta>\n  </head>\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"&quot;invalid_file.bin&quot;\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"1\">art-nzb-invalid-16-overflow-large@example.com</segment>\n    </segments>\n  </file>\n</nzb>"
-    },
-    {
-      "id": "nzb-invalid-17-missing-index-encrypted",
-      "category": "legacy_attribute_ignored",
-      "description": "Legacy custom attribute ignored by clean NZB 1.1 parser: missing segmentIndex attribute",
-      "expected_valid": true,
-      "is_encrypted": true,
-      "legacy_expected_error": "MISSING_SEGMENT_INDEX",
-      "nzb_xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <head>\n    <meta type=\"password\">test123</meta>\n    <meta type=\"yenc_encrypted\">true</meta>\n  </head>\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"&quot;missing_index.bin&quot;\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"1\">art-missing@example.com</segment>\n    </segments>\n  </file>\n</nzb>"
-    },
-    {
-      "id": "nzb-invalid-18-duplicate-index",
-      "category": "legacy_attribute_ignored",
-      "description": "Legacy custom attribute ignored by clean NZB 1.1 parser: duplicate segmentIndex attribute",
-      "expected_valid": true,
-      "is_encrypted": true,
-      "legacy_expected_error": "DUPLICATE_SEGMENT_INDEX",
-      "nzb_xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <head>\n    <meta type=\"password\">test123</meta>\n    <meta type=\"yenc_encrypted\">true</meta>\n  </head>\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"&quot;duplicate_index.bin&quot;\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"1\">art-dup-1@example.com</segment>\n      <segment bytes=\"750000\" number=\"2\">art-dup-2@example.com</segment>\n    </segments>\n  </file>\n</nzb>"
-    },
-    {
-      "id": "nzb-invalid-19-conflicting-message-id",
-      "category": "legacy_attribute_ignored",
-      "description": "Legacy custom attribute ignored by clean NZB 1.1 parser: conflicting segmentIndex attribute",
-      "expected_valid": true,
-      "is_encrypted": true,
-      "legacy_expected_error": "CONFLICTING_MESSAGE_ID_INDEX",
-      "nzb_xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <head>\n    <meta type=\"password\">test123</meta>\n    <meta type=\"yenc_encrypted\">true</meta>\n  </head>\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"&quot;conflicting_mid_1.bin&quot;\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"1\">art-conflict@example.com</segment>\n    </segments>\n  </file>\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"&quot;conflicting_mid_2.bin&quot;\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"1\">art-conflict@example.com</segment>\n    </segments>\n  </file>\n</nzb>"
-    },
-    {
-      "id": "nzb-compat-01-unencrypted-legacy",
+      "id": "nzb-compat-01-unencrypted-plain",
       "category": "unencrypted_compatibility",
-      "description": "Standard unencrypted NZB without password meta and without segmentIndex",
+      "description": "Standard unencrypted NZB without password or provenance metadata",
       "expected_valid": true,
       "is_encrypted": false,
-      "nzb_xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"[1/1] - &quot;legacy.bin&quot; yEnc (1/1)\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"1\">art-legacy@example.com</segment>\n    </segments>\n  </file>\n</nzb>",
+      "nzb_xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"[1/1] - &quot;plain.bin&quot; yEnc (1/1)\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"1\">art-plain@example.com</segment>\n    </segments>\n  </file>\n</nzb>",
       "expected_segments": [
         {
-          "message_id": "art-legacy@example.com",
+          "message_id": "art-plain@example.com",
           "part": 1,
-          "bytes": 750000,
-          "segment_index": null
-        }
-      ]
-    },
-    {
-      "id": "nzb-compat-02-unencrypted-with-ignored-index",
-      "category": "unencrypted_compatibility",
-      "description": "Unencrypted NZB without password meta where segment carries segmentIndex; unencrypted parsers ignore unknown attribute",
-      "expected_valid": true,
-      "is_encrypted": false,
-      "nzb_xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <file poster=\"poster@example.com\" date=\"1774300000\" subject=\"[1/1] - &quot;compat.bin&quot; yEnc (1/1)\">\n    <groups>\n      <group>alt.binaries.test</group>\n    </groups>\n    <segments>\n      <segment bytes=\"750000\" number=\"1\">art-compat@example.com</segment>\n    </segments>\n  </file>\n</nzb>",
-      "expected_segments": [
-        {
-          "message_id": "art-compat@example.com",
-          "part": 1,
-          "bytes": 750000,
-          "segment_index": null
+          "bytes": 750000
         }
       ]
     },
     {
       "id": "nzb-tamper-01-index-mismatch-zero-output",
       "category": "index_tampering",
-      "description": "Article encrypted with index 1; tampered NZB specifies index 2, failing Poly1305 verification with zero output",
+      "description": "Article encrypted with segmentIndex 1 but carrying an altered bootstrap index of 2 fails Poly1305 verification with zero output",
       "expected_valid": true,
       "expected_error": "AUTHENTICATION_FAILURE",
       "expected_rejection_stage": "PROVIDER_FAILOVER",
@@ -462,7 +183,7 @@
     {
       "id": "nzb-tamper-02-index-swap-zero-output",
       "category": "index_tampering",
-      "description": "Two articles with swapped segmentIndex values in NZB; both fail authentication with zero output",
+      "description": "Two articles whose bootstrap segmentIndex values are swapped both fail authentication with zero output",
       "expected_valid": true,
       "expected_error": "AUTHENTICATION_FAILURE",
       "expected_rejection_stage": "PROVIDER_FAILOVER",

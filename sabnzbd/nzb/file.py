@@ -70,7 +70,6 @@ NzbFileSaver = (
     "md5of16k",
     "file_ordinal",
     "total_files",
-    "segment_index_base",
 )
 
 
@@ -89,7 +88,6 @@ class NzbFile(TryList):
         nzo,
         file_ordinal: Optional[int] = None,
         total_files: Optional[int] = None,
-        segment_index_base: Optional[int] = None,
     ):
         """Setup object"""
         super().__init__()
@@ -105,7 +103,6 @@ class NzbFile(TryList):
 
         self.file_ordinal: Optional[int] = file_ordinal
         self.total_files: Optional[int] = total_files
-        self.segment_index_base: Optional[int] = segment_index_base
 
         # Identifiers for par2 files
         self.is_par2: bool = False
@@ -185,14 +182,7 @@ class NzbFile(TryList):
     def add_article(self, article_info):
         """Add article to object database and return article object"""
         part_number = article_info[2] if len(article_info) > 2 else None
-        segment_index = article_info[3] if len(article_info) > 3 else None
-        article = Article(
-            article_info[0],
-            article_info[1],
-            self,
-            part_number=part_number,
-            segment_index=segment_index,
-        )
+        article = Article(article_info[0], article_info[1], self, part_number=part_number)
         article.on_disk = self.assembled
         self.articles[article] = article
         self.decodetable.append(article)

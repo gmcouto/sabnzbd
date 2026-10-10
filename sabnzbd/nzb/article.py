@@ -118,7 +118,6 @@ class Article(TryList):
         article_bytes,
         nzf,
         part_number: Optional[int] = None,
-        segment_index: Optional[int] = None,
     ):
         super().__init__()
         self.article: str = article
@@ -140,7 +139,8 @@ class Article(TryList):
         # Share NzbFile lock for file-wide atomicity of try-list ops
         self.lock: threading.RLock = nzf.lock
         self.part_number: Optional[int] = part_number
-        self.segment_index: Optional[int] = segment_index
+        # Post-decode cache of the segment index read from the article bootstrap bytes
+        self.segment_index: Optional[int] = None
 
     @synchronized()
     def reset_try_list(self):

@@ -292,7 +292,7 @@
     {
       "id": "control-syntax-08-forbidden-index-10",
       "category": "control_syntax",
-      "description": "Line 1 bootstrap segmentIndex 0x0000000A contains forbidden LF byte 0x0A (CR-02); 22 bytes: 16B salt + 4B BE index at offsets 16..19 + 2B 0x3d3d trailer",
+      "description": "Line 1 bootstrap segmentIndex 0x0000000A contains forbidden LF byte 0x0A; 22 bytes: 16B salt + 4B BE index at offsets 16..19 + 2B 0x3d3d trailer",
       "line1_hex": "4b376d5839704c32715238764e34775a0000000a3d3d",
       "expected_error": "FORBIDDEN_SEGMENT_INDEX_BYTE",
       "zero_output_required": true,
@@ -302,7 +302,7 @@
     {
       "id": "control-syntax-09-forbidden-index-13",
       "category": "control_syntax",
-      "description": "Line 1 bootstrap segmentIndex 0x0000000D contains forbidden CR byte 0x0D (CR-02)",
+      "description": "Line 1 bootstrap segmentIndex 0x0000000D contains forbidden CR byte 0x0D",
       "line1_hex": "4b376d5839704c32715238764e34775a0000000d3d3d",
       "expected_error": "FORBIDDEN_SEGMENT_INDEX_BYTE",
       "zero_output_required": true,
@@ -312,7 +312,7 @@
     {
       "id": "control-syntax-10-forbidden-index-266",
       "category": "control_syntax",
-      "description": "Line 1 bootstrap segmentIndex 0x0000010A contains forbidden LF byte 0x0A at offset 19 (CR-02)",
+      "description": "Line 1 bootstrap segmentIndex 0x0000010A contains forbidden LF byte 0x0A at offset 19",
       "line1_hex": "4b376d5839704c32715238764e34775a0000010a3d3d",
       "expected_error": "FORBIDDEN_SEGMENT_INDEX_BYTE",
       "zero_output_required": true,
@@ -322,7 +322,7 @@
     {
       "id": "control-syntax-11-forbidden-index-269",
       "category": "control_syntax",
-      "description": "Line 1 bootstrap segmentIndex 0x0000010D contains forbidden CR byte 0x0D at offset 19 (CR-02)",
+      "description": "Line 1 bootstrap segmentIndex 0x0000010D contains forbidden CR byte 0x0D at offset 19",
       "line1_hex": "4b376d5839704c32715238764e34775a0000010d3d3d",
       "expected_error": "FORBIDDEN_SEGMENT_INDEX_BYTE",
       "zero_output_required": true,
@@ -448,7 +448,7 @@
     {
       "id": "header-16-tab-separated",
       "category": "header_syntax",
-      "description": "=yencryption header using a tab between tokens instead of a single SP (T8 whitespace strictness)",
+      "description": "=yencryption header using a tab between tokens instead of a single SP",
       "input_line": "=yencryption\tcipher=XChaCha20-Poly1305\tsalt=1a2b3c4d5e6f7890abcdef1234567890\tindex=00000001\ttag=ed70d238067735a20783df5e094ccafa",
       "expected_error": "INVALID_WHITESPACE",
       "zero_output_required": true,
@@ -458,7 +458,7 @@
     {
       "id": "header-17-double-space",
       "category": "header_syntax",
-      "description": "=yencryption header using two consecutive spaces between tokens instead of a single SP (T8 whitespace strictness)",
+      "description": "=yencryption header using two consecutive spaces between tokens instead of a single SP",
       "input_line": "=yencryption  cipher=XChaCha20-Poly1305  salt=1a2b3c4d5e6f7890abcdef1234567890  index=00000001  tag=ed70d238067735a20783df5e094ccafa",
       "expected_error": "INVALID_WHITESPACE",
       "zero_output_required": true,
@@ -477,7 +477,7 @@
     {
       "id": "metadata-04-body-only-vs-combined-only",
       "category": "metadata_validation",
-      "description": "Body-only-mode article (includes =yencryption line but omits Line 1 Control-Line bootstrap) presented to a combined-only receiver: mode unsupported (T2)",
+      "description": "Body-only-mode article (includes =yencryption line but omits Line 1 Control-Line bootstrap) presented to a combined-only receiver: mode unsupported",
       "expected_error": "METADATA_VALIDATION_BODY_ONLY",
       "expected_rejection_stage": "METADATA_VALIDATION",
       "provider_failover_permitted": false,

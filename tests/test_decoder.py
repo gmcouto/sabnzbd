@@ -243,7 +243,7 @@ class TestUuDecoder:
 
 
 class TestEncryptionPhase58:
-    """Phase 58 audit-divergence regression tests: CRC clearing and structural tier."""
+    """Regression tests for encrypted-path CRC clearing and the structural error tier."""
 
     @staticmethod
     def _make_encrypted_response(salt, tag, segment_index, ciphertext=b"dummy_ciphertext"):
@@ -267,7 +267,7 @@ class TestEncryptionPhase58:
         return response
 
     def test_crc_cleared_on_encrypted_body_path(self):
-        """T4: authenticated encrypted body path sets article.crc32 = None (ciphertext CRC dropped)."""
+        """Authenticated encrypted body path sets article.crc32 = None (ciphertext CRC dropped)."""
         import sabnzbd.decoder as decoder
 
         article = mock.MagicMock(spec=Article)
@@ -290,7 +290,7 @@ class TestEncryptionPhase58:
         assert article.crc32 is None, "ciphertext CRC must never persist on encrypted paths"
 
     def test_crc_propagation_chain_skips_quick_check(self):
-        """T4 full chain: article.crc32 None -> finalize_crc32 -> nzf.crc32 None -> quick-check skips CRC compare.
+        """Full chain: article.crc32 None -> finalize_crc32 -> nzf.crc32 None -> quick-check skips CRC compare.
 
         newsunpack.QuickCheck only trusts a file when nzf.crc32 matches the PAR2 hash AND the
         size matches; with nzf.crc32 None it falls to its normal verify path (no ciphertext CRC
@@ -327,7 +327,7 @@ class TestEncryptionPhase58:
         assert comparison_skipped, "quick-check must skip the CRC comparison when nzf.crc32 is None"
 
     def test_structural_error_aborts_job_without_server_search(self):
-        """T5: decoder routes YEncEncryptionStructuralError to job-terminal path with zero search_new_server."""
+        """Decoder routes YEncEncryptionStructuralError to job-terminal path with zero search_new_server."""
         import sabnzbd.decoder as decoder
         from sabnzbd.encryption import YEncEncryptionStructuralError
 

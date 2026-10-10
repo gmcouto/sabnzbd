@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0",
   "standard_version": "1.2",
-  "generated_at": "2026-10-05T00:00:00Z",
+  "generated_at": "2026-10-10T00:00:00Z",
   "description": "Deterministic test vectors for yEnc Body & Control Lines Encryption Standards v1.2",
   "files": {
     "argon2id.json": {
@@ -29,21 +29,21 @@
       "requirement": "VEC-04"
     },
     "malformed_inputs.json": {
-      "sha256": "d0b9e897a6b8e24ccf3baf6e837ba4cf06adf512ac0f7cda5b1e8e12a5bf6d79",
+      "sha256": "298e11d612bf2485001dc55a0cacd1f2df6c4499ef666fe32083c90770ec7de7",
       "vector_count": 46,
       "description": "Malformed syntax, invalid parameters, and auth failure rejection vectors (VEC-05)",
       "requirement": "VEC-05"
     },
     "nzb_segment_identity.json": {
-      "sha256": "227d07d9cde9d09b6ea19cc5ebfcceaf1799e02d9ede4ea81ef6d5c45697ec06",
-      "vector_count": 33,
-      "description": "Clean NZB 1.1 self-describing article identity and compatibility vectors (VEC-06)",
+      "sha256": "555b5cd6c497899203afe6ac8166056e787354e28982dbc013ffb1a21598c4ff",
+      "vector_count": 10,
+      "description": "NZB 1.1 parsing, self-describing article identity, and compatibility vectors (VEC-06)",
       "requirement": "VEC-06"
     },
     "index_allocation.json": {
-      "sha256": "f33a3b69213505c30e18210a6208d789617b550c8c3141cf9947122e330d4cfc",
+      "sha256": "4cacddf8f9aba2b183466f967d9d10a97443f157180c2d0feab3ccac70caada9",
       "vector_count": 4,
-      "description": "Uploader CR-02 segmentIndex allocation skip vectors (VEC-07)",
+      "description": "Uploader segmentIndex allocation skip vectors (VEC-07)",
       "requirement": "VEC-07"
     }
   }
