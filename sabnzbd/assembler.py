@@ -123,10 +123,12 @@ class Assembler(Thread):
 
     def remove_ready_bytes(self, article: Article) -> None:
         """Stop tracking an article, its data is now on disk"""
+        if not article.decoded_size:
+            return
         nzf_id = article.nzf.nzf_id
         with self.ready_bytes_lock:
             # Could already be gone, for example when the file was finished or the job was removed
-            if article.decoded_size and (cur := self.ready_bytes.get(nzf_id, 0) - article.decoded_size) > 0:
+            if (cur := self.ready_bytes.get(nzf_id, 0) - article.decoded_size) > 0:
                 self.ready_bytes[nzf_id] = cur
             else:
                 self.ready_bytes.pop(nzf_id, None)

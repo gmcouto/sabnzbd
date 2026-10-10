@@ -870,3 +870,69 @@ class TestWriterCache:
             thread.join()
 
         assert len({id(writer) for writer in seen}) == 1
+
+
+class TestReadyBytes:
+    """Verify Assembler.add_ready_bytes and Assembler.remove_ready_bytes symmetry and edge cases."""
+
+    @pytest.fixture
+    def assembler(self):
+        try:
+            sabnzbd.Assembler = Assembler()
+            yield sabnzbd.Assembler
+        finally:
+            del sabnzbd.Assembler
+
+    def test_ready_bytes_symmetry_and_falsy_decoded_size(self, assembler):
+        nzf = mock.Mock()
+        nzf.nzf_id = "test_nzf_1"
+
+        article_1000 = mock.Mock()
+        article_1000.nzf = nzf
+        article_1000.decoded_size = 1000
+
+        article_zero = mock.Mock()
+        article_zero.nzf = nzf
+        article_zero.decoded_size = 0
+
+        article_none = mock.Mock()
+        article_none.nzf = nzf
+        article_none.decoded_size = None
+
+        # Verify add_ready_bytes on 0 or None decoded_size articles does not track ready bytes
+        assembler.add_ready_bytes(article_zero)
+        assert assembler.file_ready_bytes(nzf) == 0
+        assert assembler.total_ready_bytes() == 0
+
+        assembler.add_ready_bytes(article_none)
+        assert assembler.file_ready_bytes(nzf) == 0
+        assert assembler.total_ready_bytes() == 0
+
+        # Verify add_ready_bytes on positive decoded_size tracks the byte count
+        assembler.add_ready_bytes(article_1000)
+        assert assembler.file_ready_bytes(nzf) == 1000
+        assert assembler.total_ready_bytes() == 1000
+
+        # Verify remove_ready_bytes on 0 or None decoded_size articles returns early and does not pop or reduce ready_bytes
+        assembler.remove_ready_bytes(article_zero)
+        assert assembler.file_ready_bytes(nzf) == 1000
+        assert assembler.total_ready_bytes() == 1000
+
+        assembler.remove_ready_bytes(article_none)
+        assert assembler.file_ready_bytes(nzf) == 1000
+        assert assembler.total_ready_bytes() == 1000
+
+        # Verify remove_ready_bytes on positive decoded_size decrements and removes the entry
+        assembler.remove_ready_bytes(article_1000)
+        assert assembler.file_ready_bytes(nzf) == 0
+        assert assembler.total_ready_bytes() == 0
+        assert nzf.nzf_id not in assembler.ready_bytes
+
+    def test_ready_bytes_early_return_before_nzf_access(self, assembler):
+        """remove_ready_bytes must return early before accessing article.nzf or entering lock."""
+        article_without_nzf = mock.Mock(spec=["decoded_size"])
+        article_without_nzf.decoded_size = 0
+        assembler.remove_ready_bytes(article_without_nzf)
+
+        article_without_nzf.decoded_size = None
+        assembler.remove_ready_bytes(article_without_nzf)
