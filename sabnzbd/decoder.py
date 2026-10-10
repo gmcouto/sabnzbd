@@ -27,7 +27,7 @@ import sabnzbd
 from sabnzbd.constants import SABCTOOLS_VERSION_REQUIRED
 from sabnzbd.nzb import Article
 from sabnzbd.misc import match_str
-from sabnzbd.encryption import YEncEncryptionStructuralError
+from sabnzbd.encryption import YEncEncryptionCryptoError, YEncEncryptionStructuralError
 
 # Check for correct SABCTools version
 SABCTOOLS_VERSION = None
@@ -155,13 +155,24 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
         nzo.fail_msg = T("Structural yEnc-encryption failure: missing or invalid metadata")
         nzo.set_unpack_info("Download", nzo.fail_msg)
         decoded_data = None
+        # Same bookkeeping the retry-exhaustion path performs (register the failed
+        # article, never a server search), then abort the job immediately instead of
+        # letting the article burn its retries first: no other server can supply
+        # valid metadata (job-terminal METADATA_VALIDATION tier). register_article
+        # may itself end the job when the file completes; the guarded helper detects
+        # that and only fires when the job is still active.
+        sabnzbd.NzbQueue.register_article(article, article_success)
+        _end_job_on_structural_error(nzo, art_id)
+        return
 
-    except ValueError:
-        # Authentication failure on encrypted articles: log without secrets and
-        # query next server (retryable provider corruption). Unencrypted articles
-        # that raise ValueError are also eligible for search_new_server rather than
-        # crashing the downloader thread (develop caught BadYenc and ValueError together).
-        # When servers are exhausted, cleanly fall through to register failure.
+    except YEncEncryptionCryptoError:
+        # Crypto/structural wire failure on encrypted articles (authentication failure,
+        # FF1 control-line decrypt failure, corrupt bootstrap): log without secrets and
+        # query next server (retryable provider corruption). Unencrypted articles that
+        # raise this class stay eligible for search_new_server too. Plain ValueError is
+        # deliberately NOT caught: a programming error must surface instead of being
+        # retried as provider corruption. When servers are exhausted, cleanly fall
+        # through to register failure.
         if _is_yenc_encrypted(article):
             logging.info("Authentication failed for %s, trying next server", art_id)
         else:
@@ -326,15 +337,17 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
         # must agree with the wire bootstrap; there is no XML-index preference.
         cached_index = getattr(article, "segment_index", None)
         if isinstance(cached_index, int) and cached_index != seg_idx_line1:
-            raise ValueError(f"Dual index mismatch: cached segment_index {cached_index} != wire index {seg_idx_line1}")
+            raise YEncEncryptionCryptoError(
+                f"Dual index mismatch: cached segment_index {cached_index} != wire index {seg_idx_line1}"
+            )
 
         if yenc_params["salt"] != salt_line1:
-            raise ValueError(
+            raise YEncEncryptionCryptoError(
                 f"Salt mismatch between control line 1 ({salt_line1.hex()}) and =yencryption ({yenc_params['salt'].hex()})"
             )
 
         if yenc_params["segment_index"] != seg_idx_line1:
-            raise ValueError(
+            raise YEncEncryptionCryptoError(
                 f"Dual index mismatch between control line 1 ({seg_idx_line1}) and =yencryption ({yenc_params['segment_index']})"
             )
 
@@ -355,10 +368,10 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
         try:
             sub_resp = next(dec)
         except StopIteration:
-            raise ValueError("Truncated or malformed yEnc block in encrypted article")
+            raise YEncEncryptionCryptoError("Truncated or malformed yEnc block in encrypted article")
 
         if sub_resp.crc is None:
-            raise ValueError(f"Wire CRC error in encrypted article {getattr(article, 'article', '')}")
+            raise YEncEncryptionCryptoError(f"Wire CRC error in encrypted article {getattr(article, 'article', '')}")
 
         plaintext = adapter.decrypt_body(
             ciphertext=bytes(sub_resp.data),
@@ -416,9 +429,9 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
             try:
                 parsed_enc = parse_yencryption_line(yenc_info)
             except Exception as e:
-                raise ValueError(f"Malformed =yencryption line in article: {e}") from e
+                raise YEncEncryptionCryptoError(f"Malformed =yencryption line in article: {e}") from e
         if not parsed_enc:
-            raise ValueError(f"Malformed or unparsed =yencryption line in article: {yenc_info!r}")
+            raise YEncEncryptionCryptoError(f"Malformed or unparsed =yencryption line in article: {yenc_info!r}")
 
     if parsed_enc:
         if decoded_data is None:
@@ -440,9 +453,13 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
         segment_index = parsed_enc.get("segment_index")
         cached_index = getattr(article, "segment_index", None)
         if segment_index is None:
-            raise ValueError(f"Missing explicit segment_index for encrypted article {getattr(article, 'article', '')}")
+            raise YEncEncryptionCryptoError(
+                f"Missing explicit segment_index for encrypted article {getattr(article, 'article', '')}"
+            )
         if cached_index is not None and cached_index != segment_index:
-            raise ValueError(f"Dual index mismatch: cached segment_index {cached_index} != wire index {segment_index}")
+            raise YEncEncryptionCryptoError(
+                f"Dual index mismatch: cached segment_index {cached_index} != wire index {segment_index}"
+            )
 
         plaintext = adapter.decrypt_body(
             ciphertext=bytes(decoded_data),
@@ -466,7 +483,7 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
     # Gate strictly on _is_yenc_encrypted (declared-encrypted provenance), never on the
     # archive-extraction password.
     if not parsed_enc and _is_yenc_encrypted(article):
-        raise ValueError(
+        raise YEncEncryptionCryptoError(
             f"UNAUTHENTICATED_ARTICLE: plain yEnc article {getattr(article, 'article', '')} in a yEnc-encrypted release"
         )
 
@@ -486,7 +503,7 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
     if (crc := response.crc) is None:
         logging.info("CRC Error in %s", article.article)
         if bool(parsed_enc) or _is_yenc_encrypted(article):
-            raise ValueError(f"Wire CRC error in encrypted article {article.article}")
+            raise YEncEncryptionCryptoError(f"Wire CRC error in encrypted article {article.article}")
         # A streamed article is already on disk, so there is nothing to hand back; the
         # bytes stay put either way, so par2 has the same chance of repairing it
         raise BadData(decoded_data)
@@ -525,6 +542,28 @@ def decode_uu(article: Article, response: sabctools.NNTPResponse) -> bytearray:
     article.crc32 = response.crc
 
     return decoded_data
+
+
+def _end_job_on_structural_error(nzo: "sabnzbd.nzb.NzbObject", art_id: str) -> None:
+    """Abort the job immediately on a structural encryption error.
+
+    The structural tier is job-terminal (METADATA_VALIDATION): no other server can
+    supply valid metadata, so waiting for retry exhaustion would only burn the
+    article's tries before the queue ends the job anyway. Guarded, not swallowed:
+    a missing queue (never initialized, e.g. in tooling) or a job that already left
+    the download path is skipped, and any failure inside end_job is logged.
+    """
+    queue = getattr(sabnzbd, "NzbQueue", None)
+    if queue is None or getattr(nzo, "pp_or_finished", False) or getattr(nzo, "removed_from_queue", False):
+        # Queue not available or job already ended: the retry-exhaustion path still
+        # terminates the job later, so nothing is lost by deferring.
+        logging.debug("Skipping immediate structural abort of %s (queue unavailable or job already ended)", art_id)
+        return
+    try:
+        queue.end_job(nzo)
+    except Exception:
+        logging.error(T("Failed to abort job %s after structural yEnc-encryption failure"), nzo.final_name)
+        logging.info("Traceback: ", exc_info=True)
 
 
 def search_new_server(article: Article) -> bool:

@@ -240,3 +240,36 @@ def test_index_allocation_conformance():
             assigned_bytes = assigned.to_bytes(4, "big")
             assert not any(b in (0x0A, 0x0D) for b in assigned_bytes), "assigned index must be CR-02-safe"
             assert assigned_bytes.hex() == vec["expected_index_hex"]
+
+
+@pytest.mark.config({"download_dir": SAB_CACHE_DIR})
+def test_subject_prefix_file_ordinal_extraction():
+    """F3.3: [N/M] subject prefix is extracted into structured nzf.file_ordinal/total_files."""
+    plain_xml = """<?xml version="1.0" encoding="utf-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
+ <head><meta type="password">pw</meta></head>
+ <file poster="p@test.com" date="1600000000" subject="&quot;no_prefix.bin&quot; yEnc (1/1)">
+  <segments><segment bytes="1000" number="1">np1@test</segment></segments>
+ </file>
+</nzb>"""
+    prefixed_xml = """<?xml version="1.0" encoding="utf-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
+ <head><meta type="password">pw</meta></head>
+ <file poster="p@test.com" date="1600000000" subject="[2/3] &quot;prefixed.bin&quot; yEnc (1/1)">
+  <segments><segment bytes="1000" number="1">pf1@test</segment></segments>
+ </file>
+</nzb>"""
+
+    # Subject without an [N/M] prefix: no ordinal metadata
+    plain_nzo = NzbObject("plain")
+    nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, "ordinal_plain", plain_xml), plain_nzo)
+    assert len(plain_nzo.files) == 1
+    assert plain_nzo.files[0].file_ordinal is None
+    assert plain_nzo.files[0].total_files is None
+
+    # Subject with [2/3]: structured extraction, filename keeps the prefix (subject unchanged)
+    prefixed_nzo = NzbObject("prefixed")
+    nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, "ordinal_prefixed", prefixed_xml), prefixed_nzo)
+    assert len(prefixed_nzo.files) == 1
+    assert prefixed_nzo.files[0].file_ordinal == 2
+    assert prefixed_nzo.files[0].total_files == 3

@@ -1666,6 +1666,89 @@ class TestVectorVendoring:
             assert assigned_bytes.hex() == vec["expected_index_hex"]
             assert assigned > vec["candidate_index"]
 
+    def test_malformed_inputs_schema_invariants(self):
+        """VEC-05 schema invariants over malformed_inputs.json (TREE 2 test_conformance_vectors port).
+
+        Complements test_malformed_inputs_matrix (which dispatches every vector through
+        the actual parsers) by pinning the fixture-level taxonomy: stable vector count,
+        known error tokens, tier assignment, and the zero-output guarantee.
+        """
+        vector_dir = _get_test_vector_dir()
+        with open(vector_dir / "malformed_inputs.json", "r", encoding="utf-8") as f:
+            vectors = json.load(f)["vectors"]
+        assert len(vectors) == 46
+
+        known_errors = {
+            "UNSUPPORTED_CIPHER",
+            "INVALID_TOKEN_COUNT",
+            "INVALID_SALT_LENGTH",
+            "INVALID_SALT_HEX",
+            "INVALID_TAG_LENGTH",
+            "INVALID_TAG_HEX",
+            "ZERO_SEGMENT_INDEX",
+            "INVALID_INDEX_LENGTH",
+            "INVALID_INDEX_HEX",
+            "UPPERCASE_HEX",
+            "AUTHENTICATION_FAILURE",
+            "INVALID_SALT_CHARACTER",
+            "LINE_TOO_SHORT",
+            "LINE_TRUNCATED",
+            "FORBIDDEN_SEGMENT_INDEX_BYTE",
+            "CONTROL_LINE_DECRYPT_FAILURE",
+            "MISSING_ENCRYPTION_PROVENANCE",
+            "INVALID_ENCRYPTION_PROVENANCE",
+            "MISPLACED_ENCRYPTION_HEADER",
+            "DUAL_SALT_MISMATCH",
+            "DUAL_INDEX_MISMATCH",
+            "INVALID_WHITESPACE",
+            "MISSING_PASSWORD",
+            "METADATA_VALIDATION_BODY_ONLY",
+        }
+        for vector in vectors:
+            assert vector["expected_error"] in known_errors
+            assert vector["expected_rejection_stage"] in ("PROVIDER_FAILOVER", "METADATA_VALIDATION")
+            assert vector["zero_output_required"] is True
+
+        # Authentication failures must stay retryable: eligible for provider
+        # failover and never released as final output.
+        auth_failures = [v for v in vectors if v["expected_error"] == "AUTHENTICATION_FAILURE"]
+        assert len(auth_failures) == 4
+        for vector in auth_failures:
+            assert vector["expected_rejection_stage"] == "PROVIDER_FAILOVER"
+            assert vector["provider_failover_permitted"] is True
+            assert vector["zero_output_required"] is True
+
+        # Metadata-shape failures are job-level, never provider corruption.
+        metadata_failures = [v for v in vectors if v["expected_rejection_stage"] == "METADATA_VALIDATION"]
+        assert len(metadata_failures) == 4
+        for vector in metadata_failures:
+            assert vector["provider_failover_permitted"] is False
+
+    def test_nzb_meta_tag_expectations(self):
+        """VEC-06: encrypted NZBs carry yenc_encrypted + password meta; plain NZBs don't."""
+        vector_dir = _get_test_vector_dir()
+        with open(vector_dir / "nzb_segment_identity.json", "r", encoding="utf-8") as f:
+            vectors = json.load(f)["vectors"]
+        assert len(vectors) == 33
+
+        encrypted = [v for v in vectors if v.get("is_encrypted")]
+        unencrypted = [v for v in vectors if v.get("is_encrypted") is False]
+        assert len(unencrypted) == 2
+
+        for vector in encrypted:
+            nzb_xml = vector["nzb_xml"]
+            assert '<meta type="yenc_encrypted">true</meta>' in nzb_xml, vector["id"]
+            assert '<meta type="password">' in nzb_xml, vector["id"]
+
+        for vector in unencrypted:
+            nzb_xml = vector["nzb_xml"]
+            assert '<meta type="yenc_encrypted">' not in nzb_xml, vector["id"]
+            assert '<meta type="password">' not in nzb_xml, vector["id"]
+            # Unencrypted releases keep valid identity with no segmentIndex.
+            assert vector["expected_valid"] is True
+            for segment in vector["expected_segments"]:
+                assert segment["segment_index"] is None
+
 
 class TestDotUnstuffing:
     """T9: dot-stuffing transport boundary (RFC 3977 §3.1.1) for encrypted Line 1."""
@@ -2130,3 +2213,156 @@ class TestHeaderRegionFailClosed:
         )
         with pytest.raises(ValueError):
             extract_and_remove_yencryption(indented)
+
+
+class TestDecodeTimeStructuralAbort:
+    """F3.1: decode-time structural errors end the job immediately, not after retry exhaustion."""
+
+    def _structural_article(self):
+        import sabctools
+
+        article = mock.MagicMock(spec=Article)
+        article.article = "structural@abort"
+        article.nzf.nzo.yenc_encrypted = True
+        article.nzf.nzo.precheck = False
+        article.nzf.nzo.password = None  # structural: no password
+        article.nzf.nzo.pp_or_finished = False
+        article.nzf.nzo.removed_from_queue = False
+        article.segment_index = None
+        article.search_new_server.return_value = True  # must never be consulted
+        article.on_disk = False
+
+        response = mock.MagicMock(spec=sabctools.NNTPResponse)
+        response.sink_failed = False
+        response.format = sabctools.EncodingFormat.YENC
+        response.data = bytearray(b"ciphertext")
+        response.file_size = 10
+        response.part_begin = 0
+        response.part_size = 10
+        response.bytes_decoded = 10
+        response.file_name = "test.bin"
+        response.crc = 0x12345678
+        response.lines = None
+        response.yencryption = {
+            "cipher": "XChaCha20-Poly1305",
+            "salt": b"\x01" * 16,
+            "tag": b"\x02" * 16,
+            "segment_index": 1,
+        }
+        return article, response
+
+    def test_decode_time_structural_error_ends_job_immediately(self):
+        """F3.1: decode() routes the structural failure to NzbQueue.end_job in the same call."""
+        import sabnzbd.decoder as decoder
+        from sabnzbd.encryption import YEncEncryptionStructuralError
+
+        article, response = self._structural_article()
+
+        mock_cache = mock.MagicMock()
+        mock_queue = mock.MagicMock()
+        with (
+            mock.patch("sabnzbd.decoder.decode_yenc", side_effect=YEncEncryptionStructuralError("MISSING_PASSWORD")),
+            mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
+            mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
+        ):
+            decoder.decode(article, response)
+
+            # Immediate terminal behavior: end_job fired on this very decode() call,
+            # before any retry would have been possible.
+            mock_queue.end_job.assert_called_once_with(article.nzf.nzo)
+            # Bookkeeping still ran (failed article registered), and no failover.
+            mock_queue.register_article.assert_called_once_with(article, False)
+            assert not article.search_new_server.called
+            assert not mock_cache.save_article.called
+            assert not article.on_disk
+            assert article.nzf.nzo.fail_msg
+
+    def test_decode_time_structural_error_skips_end_job_when_already_ended(self):
+        """F3.1: when register_article already completed the job, no second end_job is issued."""
+        import sabnzbd.decoder as decoder
+        from sabnzbd.encryption import YEncEncryptionStructuralError
+
+        article, response = self._structural_article()
+        article.nzf.nzo.removed_from_queue = True
+
+        mock_cache = mock.MagicMock()
+        mock_queue = mock.MagicMock()
+        with (
+            mock.patch("sabnzbd.decoder.decode_yenc", side_effect=YEncEncryptionStructuralError("MISSING_PASSWORD")),
+            mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
+            mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
+        ):
+            decoder.decode(article, response)
+            mock_queue.end_job.assert_not_called()
+            mock_queue.register_article.assert_called_once_with(article, False)
+
+    def test_decode_time_structural_error_without_queue_defers(self, caplog):
+        """F3.1: with no queue initialized (tooling), the abort is deferred, not crashed on."""
+        import logging
+
+        import sabnzbd.decoder as decoder
+
+        nzo = mock.MagicMock()
+        nzo.pp_or_finished = False
+        nzo.removed_from_queue = False
+
+        with (
+            mock.patch.object(sabnzbd, "NzbQueue", None, create=True),
+            caplog.at_level(logging.DEBUG),
+        ):
+            decoder._end_job_on_structural_error(nzo, "structural@abort")
+            # Deferred with a log entry, no crash
+            assert "structural abort" in caplog.text
+
+
+class TestCryptoErrorRetryTier:
+    """F3.2: only YEncEncryptionCryptoError is retried as provider corruption; plain ValueError is not."""
+
+    def test_crypto_error_is_retryable_and_value_error_is_not(self, caplog):
+        import sabctools
+
+        import sabnzbd.decoder as decoder
+        from sabnzbd.encryption import YEncEncryptionCryptoError
+
+        assert issubclass(YEncEncryptionCryptoError, ValueError)
+        assert not issubclass(ValueError, YEncEncryptionCryptoError)
+
+        article = mock.MagicMock(spec=Article)
+        article.article = "tier@enc"
+        article.nzf.nzo.yenc_encrypted = True
+        article.nzf.nzo.precheck = False
+        article.nzf.nzo.password = "secret"
+        article.segment_index = None
+        article.on_disk = False
+
+        response = mock.MagicMock(spec=sabctools.NNTPResponse)
+
+        # Crypto failure (e.g. Poly1305 auth failure): retriable provider corruption
+        mock_cache = mock.MagicMock()
+        mock_queue = mock.MagicMock()
+        with (
+            mock.patch(
+                "sabnzbd.decoder.decode_yenc",
+                side_effect=YEncEncryptionCryptoError("Poly1305 authentication failed"),
+            ),
+            mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
+            mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
+        ):
+            article.search_new_server.return_value = True
+            decoder.decode(article, response)
+            assert article.search_new_server.called
+            assert "Authentication failed for tier@enc, trying next server" in caplog.text
+
+        # Plain ValueError (programming error): the crypto-retry tier is never entered,
+        # so the "Authentication failed" classification is not applied to it.
+        caplog.clear()
+        article.search_new_server.reset_mock()
+        with (
+            mock.patch("sabnzbd.decoder.decode_yenc", side_effect=ValueError("programming bug")),
+            mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
+            mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
+        ):
+            decoder.decode(article, response)
+            assert "Authentication failed for tier@enc, trying next server" not in caplog.text
+            # The ValueError is handled as an unknown error, not as provider corruption
+            assert "Unknown Error while decoding tier@enc" in caplog.text

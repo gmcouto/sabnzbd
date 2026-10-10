@@ -22,6 +22,7 @@ sabnzbd.nzbparser - Parse and import NZB files
 import os
 import bz2
 import gzip
+import re
 import time
 import logging
 import hashlib
@@ -492,6 +493,17 @@ def nzbfile_parser(full_nzb_path: str, nzo, force_encrypted: bool = False):
                     (article_id, segment_size, partnum)
                     for partnum, (article_id, segment_size, _partnum) in sorted(raw_article_db.items())
                 ]
+
+                # Extract file_ordinal and total_files if subject has [N/M]
+                file_ordinal = None
+                total_files = None
+                if m := re.search(r"\[(\d+)/(\d+)\]", file_name):
+                    try:
+                        file_ordinal = int(m.group(1))
+                        total_files = int(m.group(2))
+                    except ValueError:
+                        pass
+
                 parsed_files.append(
                     {
                         "date": file_date,
@@ -499,6 +511,8 @@ def nzbfile_parser(full_nzb_path: str, nzo, force_encrypted: bool = False):
                         "file_name": file_name,
                         "bytes": file_bytes,
                         "raw_articles": sorted_articles,
+                        "file_ordinal": file_ordinal,
+                        "total_files": total_files,
                     }
                 )
                 element.clear()
@@ -548,6 +562,8 @@ def nzbfile_parser(full_nzb_path: str, nzo, force_encrypted: bool = False):
                     raw_article_db_sorted,
                     f["bytes"],
                     nzo,
+                    file_ordinal=f["file_ordinal"],
+                    total_files=f["total_files"],
                 )
             except SkippedNzbFile:
                 # Did not meet requirements, so continue

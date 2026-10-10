@@ -44,6 +44,18 @@ class YEncEncryptionStructuralError(ValueError):
     """
 
 
+class YEncEncryptionCryptoError(ValueError):
+    """Retryable yEnc-encryption crypto failure (provider corruption tier).
+
+    Wire-level crypto failures: Poly1305 authentication failure, FF1 control-line
+    decryption failure, malformed or mismatched encrypted metadata, corrupt bootstrap
+    bytes. decoder.py catches this class specifically for the provider-failover tier
+    (PROVIDER_FAILOVER semantics); a plain ValueError is a programming error and is
+    never retried as provider corruption. Inherits from ValueError so existing
+    ``isinstance(e, ValueError)`` handlers still catch it.
+    """
+
+
 def byte_to_numeral(b: int) -> int:
     """Map byte octet to numeral 0..252 per yEnc Control Lines Standard v1.0."""
     if 0x01 <= b <= 0x09:
@@ -54,7 +66,7 @@ def byte_to_numeral(b: int) -> int:
         return 10
     elif 0x0E <= b <= 0xFF:
         return b - 3
-    raise ValueError(f"Byte 0x{b:02x} is outside the 253-byte Alphabet (0x00, 0x0A, 0x0D forbidden)")
+    raise YEncEncryptionCryptoError(f"Byte 0x{b:02x} is outside the 253-byte Alphabet (0x00, 0x0A, 0x0D forbidden)")
 
 
 def numeral_to_byte(i: int) -> int:
@@ -67,7 +79,7 @@ def numeral_to_byte(i: int) -> int:
         return 0x0C
     elif 11 <= i <= 252:
         return i + 3
-    raise ValueError(f"Numeral {i} is out of range [0, 252]")
+    raise YEncEncryptionCryptoError(f"Numeral {i} is out of range [0, 252]")
 
 
 def num_radix(numerals: list[int], radix: int) -> int:
@@ -142,7 +154,7 @@ def ff1_encrypt_numerals(key: bytes, tweak: bytes, numerals: list[int], radix: i
 def ff1_encrypt(key: bytes, tweak: bytes, plaintext_bytes: bytes, radix: int = 253) -> bytes:
     """Encrypt control line byte string using FF1 over Radix 253 Alphabet."""
     if len(plaintext_bytes) < 2:
-        raise ValueError(f"Line too short: {len(plaintext_bytes)} bytes (minimum 2)")
+        raise YEncEncryptionCryptoError(f"Line too short: {len(plaintext_bytes)} bytes (minimum 2)")
     numerals = [byte_to_numeral(b) for b in plaintext_bytes]
     ct_numerals = ff1_encrypt_numerals(key, tweak, numerals, radix)
     return bytes(numeral_to_byte(i) for i in ct_numerals)
@@ -197,7 +209,7 @@ def ff1_decrypt_numerals(key: bytes, tweak: bytes, numerals: list[int], radix: i
 def ff1_decrypt(key: bytes, tweak: bytes, ciphertext_bytes: bytes, radix: int = 253) -> bytes:
     """Decrypt control line byte string using FF1 over Radix 253 Alphabet."""
     if len(ciphertext_bytes) < 2:
-        raise ValueError(f"Line too short: {len(ciphertext_bytes)} bytes (minimum 2)")
+        raise YEncEncryptionCryptoError(f"Line too short: {len(ciphertext_bytes)} bytes (minimum 2)")
     numerals = [byte_to_numeral(b) for b in ciphertext_bytes]
     pt_numerals = ff1_decrypt_numerals(key, tweak, numerals, radix)
     return bytes(numeral_to_byte(i) for i in pt_numerals)
@@ -209,7 +221,7 @@ def parse_yencryption_line(line: str | bytes) -> Optional[dict[str, Any]]:
     Format: =yencryption cipher=XChaCha20-Poly1305 salt=<32_hex_chars> index=<8_hex_chars> tag=<32_hex_chars>
     Enforces strict grammar: exactly 4 single-SP separators (no leading/trailing whitespace,
     no tabs, no double spaces), exact total length 128, exact token order, exact lowercase
-    hex, and exact field lengths. Grammar violations raise ValueError (mapped by callers to
+    hex, and exact field lengths. Grammar violations raise YEncEncryptionCryptoError (mapped by callers to
     the retryable PROVIDER_FAILOVER tier).
     """
     if isinstance(line, bytes):
@@ -225,7 +237,7 @@ def parse_yencryption_line(line: str | bytes) -> Optional[dict[str, Any]]:
     strict_tokens = line.split(" ")
     normalized_tokens = line.split()
     if len(strict_tokens) != len(normalized_tokens) or any(token == "" for token in strict_tokens):
-        raise ValueError("INVALID_WHITESPACE: =yencryption requires exactly 4 single-SP separators")
+        raise YEncEncryptionCryptoError("INVALID_WHITESPACE: =yencryption requires exactly 4 single-SP separators")
     if len(normalized_tokens) != 5:
         return None
     tokens = normalized_tokens
@@ -242,7 +254,9 @@ def parse_yencryption_line(line: str | bytes) -> Optional[dict[str, Any]]:
 
     # Exact 128-byte total length assertion (Body Std v1.2 grammar)
     if len(line) != 128:
-        raise ValueError(f"INVALID_LENGTH: =yencryption line must be exactly 128 characters, got {len(line)}")
+        raise YEncEncryptionCryptoError(
+            f"INVALID_LENGTH: =yencryption line must be exactly 128 characters, got {len(line)}"
+        )
 
     salt_hex = tokens[2][len("salt=") :]
     index_hex = tokens[3][len("index=") :]
@@ -261,7 +275,9 @@ def parse_yencryption_line(line: str | bytes) -> Optional[dict[str, Any]]:
 
     idx_bytes = struct.pack(">I", segment_index)
     if b"\x0a" in idx_bytes or b"\x0d" in idx_bytes:
-        raise ValueError(f"FORBIDDEN_SEGMENT_INDEX_BYTE: segment index {segment_index} contains 0x0A or 0x0D (CR-02)")
+        raise YEncEncryptionCryptoError(
+            f"FORBIDDEN_SEGMENT_INDEX_BYTE: segment index {segment_index} contains 0x0A or 0x0D (CR-02)"
+        )
 
     try:
         salt = bytes.fromhex(salt_hex)
@@ -298,38 +314,40 @@ def extract_and_remove_yencryption(yenc_block: bytes) -> tuple[dict[str, Any], b
     """
     raw_lines = yenc_block.splitlines(keepends=True)
     if len(raw_lines) < 2:
-        raise ValueError(f"Article block too short: {len(raw_lines)} line(s)")
+        raise YEncEncryptionCryptoError(f"Article block too short: {len(raw_lines)} line(s)")
 
     line1 = raw_lines[0]
     if not line1.startswith(b"=ybegin"):
-        raise ValueError("Line 1 does not start with =ybegin")
+        raise YEncEncryptionCryptoError("Line 1 does not start with =ybegin")
 
     is_multipart = any(token.startswith(b"part=") for token in line1.split())
 
     if is_multipart:
         if len(raw_lines) < 3:
-            raise ValueError(f"Multipart article too short: {len(raw_lines)} line(s)")
+            raise YEncEncryptionCryptoError(f"Multipart article too short: {len(raw_lines)} line(s)")
         line2 = raw_lines[1]
         if not line2.startswith(b"=ypart"):
-            raise ValueError("Line 2 in multipart article does not start with =ypart")
+            raise YEncEncryptionCryptoError("Line 2 in multipart article does not start with =ypart")
         line3 = raw_lines[2]
         if not line3.startswith(b"=yencryption"):
-            raise ValueError("Line 3 in multipart article does not start with =yencryption")
+            raise YEncEncryptionCryptoError("Line 3 in multipart article does not start with =yencryption")
         yenc_idx = 2
     else:
         line2 = raw_lines[1]
         if not line2.startswith(b"=yencryption"):
-            raise ValueError("Line 2 in single-part article does not start with =yencryption")
+            raise YEncEncryptionCryptoError("Line 2 in single-part article does not start with =yencryption")
         yenc_idx = 1
 
     for idx, r_line in enumerate(raw_lines):
         if idx != yenc_idx and r_line.startswith(b"=yencryption"):
-            raise ValueError(f"Duplicate or misplaced =yencryption found at line {idx + 1}")
+            raise YEncEncryptionCryptoError(f"Duplicate or misplaced =yencryption found at line {idx + 1}")
 
     yenc_line = raw_lines[yenc_idx]
     params = parse_yencryption_line(yenc_line)
     if not params:
-        raise ValueError(f"Malformed =yencryption line: {yenc_line.decode('ascii', errors='replace').strip()}")
+        raise YEncEncryptionCryptoError(
+            f"Malformed =yencryption line: {yenc_line.decode('ascii', errors='replace').strip()}"
+        )
 
     clean_lines = raw_lines[:yenc_idx] + raw_lines[yenc_idx + 1 :]
     return params, b"".join(clean_lines)
@@ -341,19 +359,19 @@ def extract_bootstrap_from_line1(line1: bytes) -> tuple[bytes, int]:
     Ensures line is at least 22 bytes, at most 4096 bytes, salt contains no forbidden bytes, and segment_index > 0.
     """
     if len(line1) < 22:
-        raise ValueError(f"Line 1 truncated: {len(line1)} bytes (minimum 22)")
+        raise YEncEncryptionCryptoError(f"Line 1 truncated: {len(line1)} bytes (minimum 22)")
     if len(line1) > 4096:
-        raise ValueError(f"Line 1 too long: {len(line1)} bytes (maximum 4096)")
+        raise YEncEncryptionCryptoError(f"Line 1 too long: {len(line1)} bytes (maximum 4096)")
     salt = line1[:16]
     for b in salt:
         if b in (0x00, 0x0A, 0x0D):
-            raise ValueError(f"Forbidden byte 0x{b:02x} in salt (0x00, 0x0A, 0x0D forbidden)")
+            raise YEncEncryptionCryptoError(f"Forbidden byte 0x{b:02x} in salt (0x00, 0x0A, 0x0D forbidden)")
     segment_index = int.from_bytes(line1[16:20], "big")
     if segment_index == 0:
-        raise ValueError("ZERO_SEGMENT_INDEX: segment index cannot be zero")
+        raise YEncEncryptionCryptoError("ZERO_SEGMENT_INDEX: segment index cannot be zero")
     if any(b in (0x0A, 0x0D) for b in line1[16:20]):
         # CR-02: a 0x0A/0x0D inside the index bytes splits Line 1 on the wire
-        raise ValueError("FORBIDDEN_SEGMENT_INDEX_BYTE: segment index bytes contain 0x0A or 0x0D")
+        raise YEncEncryptionCryptoError("FORBIDDEN_SEGMENT_INDEX_BYTE: segment index bytes contain 0x0A or 0x0D")
     return salt, segment_index
 
 
@@ -459,23 +477,23 @@ class DecryptionAdapter:
     def derive_body_nonce(self, key: bytes, segment_index: int) -> bytes:
         """Derive 24-byte nonce for XChaCha20-Poly1305 via 19-byte HMAC-SHA256 layout."""
         if not (0 <= segment_index <= 0xFFFFFFFF):
-            raise ValueError(f"segment_index {segment_index} out of range for uint32_be")
+            raise YEncEncryptionCryptoError(f"segment_index {segment_index} out of range for uint32_be")
         msg = b"yenc-body nonce" + struct.pack(">I", segment_index)
         return hmac.new(key, msg, hashlib.sha256).digest()[:24]
 
     def derive_control_keys(self, master_key: bytes, segment_index: int, line_index: int) -> tuple[bytes, bytes]:
         """Derive 32-byte encKey and 8-byte tweak for FF1 control line encryption."""
         if not (0 <= segment_index <= 0xFFFFFFFF):
-            raise ValueError(f"segment_index {segment_index} out of range for uint32_be")
+            raise YEncEncryptionCryptoError(f"segment_index {segment_index} out of range for uint32_be")
         if not (0 <= line_index <= 0xFFFFFFFF):
-            raise ValueError(f"line_index {line_index} out of range for uint32_be")
+            raise YEncEncryptionCryptoError(f"line_index {line_index} out of range for uint32_be")
         enc_key = hmac.new(master_key, b"yenc-control key", hashlib.sha256).digest()
         tweak_msg = b"yenc-control tweak" + struct.pack(">I", segment_index) + struct.pack(">I", line_index)
         tweak = hmac.new(master_key, tweak_msg, hashlib.sha256).digest()[:8]
         return enc_key, tweak
 
     def decrypt_body(self, ciphertext: bytes, tag: bytes, salt: bytes, segment_index: int) -> bytes:
-        """Authenticate and decrypt ciphertext; raises ValueError on auth failure without releasing plaintext."""
+        """Authenticate and decrypt ciphertext; raises YEncEncryptionCryptoError on auth failure without releasing plaintext."""
         key = self.get_master_key(salt)
         nonce = self.derive_body_nonce(key, segment_index)
         ct_and_tag = ciphertext + tag
@@ -483,7 +501,7 @@ class DecryptionAdapter:
             return nb.crypto_aead_xchacha20poly1305_ietf_decrypt(ct_and_tag, None, nonce, key)
         except Exception as e:
             # Zero-output guarantee: release zero bytes
-            raise ValueError(f"Poly1305 authentication failed: {e}") from e
+            raise YEncEncryptionCryptoError(f"Poly1305 authentication failed: {e}") from e
 
     def encrypt_control_line(self, plaintext: bytes, enc_key: bytes, tweak: bytes, radix: int = 253) -> bytes:
         """Encrypt a single control line with FF1 over Radix 253."""
@@ -529,7 +547,7 @@ class DecryptionAdapter:
         # Line 1: first 20 bytes is bootstrap prefix ([16B salt][4B uint32_be(segmentIndex)])
         salt, line1_segment_index = extract_bootstrap_from_line1(line1_content)
         if segment_index is not None and segment_index != line1_segment_index:
-            raise ValueError(
+            raise YEncEncryptionCryptoError(
                 f"Dual index mismatch: caller specified {segment_index} but line 1 bootstrap contains {line1_segment_index}"
             )
 
@@ -538,11 +556,13 @@ class DecryptionAdapter:
         enc_key, tweak1 = self.derive_control_keys(master_key, line1_segment_index, 1)
         pt1 = self.decrypt_control_line(ct1, enc_key, tweak1)
         if not pt1.startswith(b"=ybegin"):
-            raise ValueError("Control line decrypt failure: line 1 does not start with =ybegin")
+            raise YEncEncryptionCryptoError("Control line decrypt failure: line 1 does not start with =ybegin")
 
         is_multipart = any(token.startswith(b"part=") for token in pt1.split())
         if len(raw_lines) < 2:
-            raise ValueError(f"Article block too short for encrypted yEnc: {len(raw_lines)} line(s) (minimum 2)")
+            raise YEncEncryptionCryptoError(
+                f"Article block too short for encrypted yEnc: {len(raw_lines)} line(s) (minimum 2)"
+            )
 
         max_header_lines = 3 if is_multipart else 2
 
@@ -567,27 +587,31 @@ class DecryptionAdapter:
                 enc_key, tweak = self.derive_control_keys(master_key, line1_segment_index, line_index)
                 try:
                     pt = self.decrypt_control_line(content, enc_key, tweak)
-                except Exception as e:
+                except YEncEncryptionCryptoError as e:
                     # WR-02 fail-closed (Control Std v1.2 §5 step 4a): only decryption
                     # SUCCESS yielding non-=y content terminates the header loop (first
                     # data line). An FF1 error on an expected header line is retriable
                     # provider corruption - the raw wire line is never passed through
                     # as a data line.
-                    raise ValueError(
+                    raise YEncEncryptionCryptoError(
                         f"PROVIDER_FAILOVER: control-line decryption failed at line {line_index} in the header region"
                     ) from e
 
                 if pt and pt.startswith(b"=y"):
                     if is_multipart and line_index == 2:
                         if not pt.startswith(b"=ypart"):
-                            raise ValueError("Multipart line 2 does not start with =ypart")
+                            raise YEncEncryptionCryptoError("Multipart line 2 does not start with =ypart")
                     elif not is_multipart and line_index == 2:
                         if not pt.startswith(b"=yencryption"):
-                            raise ValueError(f"Header line {line_index} does not start with =yencryption")
+                            raise YEncEncryptionCryptoError(
+                                f"Header line {line_index} does not start with =yencryption"
+                            )
                         in_header = False
                     elif is_multipart and line_index == 3:
                         if not pt.startswith(b"=yencryption"):
-                            raise ValueError(f"Header line {line_index} does not start with =yencryption")
+                            raise YEncEncryptionCryptoError(
+                                f"Header line {line_index} does not start with =yencryption"
+                            )
                         in_header = False
                     restored_lines.append(pt + line_ending)
                 else:
@@ -612,7 +636,7 @@ class DecryptionAdapter:
         enc_key, tweak = self.derive_control_keys(master_key, line1_segment_index, footer_line_index)
         pt_footer = self.decrypt_control_line(footer_content, enc_key, tweak)
         if not pt_footer.startswith(b"=yend"):
-            raise ValueError("Control line decrypt failure: footer does not start with =yend")
+            raise YEncEncryptionCryptoError("Control line decrypt failure: footer does not start with =yend")
         restored_lines.append(pt_footer + footer_ending)
         if trailing_lines:
             restored_lines.extend(trailing_lines)
