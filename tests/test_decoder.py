@@ -242,7 +242,7 @@ class TestUuDecoder:
             )
 
 
-class TestEncryptionPhase58:
+class TestEncryptedCrcAndStructuralTier:
     """Regression tests for encrypted-path CRC clearing and the structural error tier."""
 
     @staticmethod

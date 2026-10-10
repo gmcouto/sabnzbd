@@ -1660,8 +1660,8 @@ def test_password_redaction(caplog):
     assert "Read 1 password(s) from meta data in NZB" in caplog.text
 
 
-def test_c3_01_save_load_attribs_password_redaction(caplog):
-    """C3-01: save_attribs and load_attribs sanitize passwords in debug logs."""
+def test_save_load_attribs_password_redaction(caplog):
+    """save_attribs and load_attribs sanitize passwords in debug logs."""
     from unittest import mock
     from sabnzbd.nzb import NzbObject
 

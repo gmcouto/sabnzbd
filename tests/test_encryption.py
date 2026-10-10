@@ -1181,7 +1181,7 @@ class TestDirectWriteGatingAndFailover:
 class TestCycle1AdversarialRemediation:
     """Cycle 1 adversarial review remediation regression tests [ADV-SABNZBD-01]."""
 
-    def test_c1_01_adapter_key_cache_thread_safety(self):
+    def test_adapter_key_cache_thread_safety(self):
         """DecryptionAdapter._key_cache thread-safety under concurrent access."""
         import concurrent.futures
         from sabnzbd.encryption import DecryptionAdapter
@@ -1202,7 +1202,7 @@ class TestCycle1AdversarialRemediation:
         # Exactly one entry in key cache
         assert salt in adapter._key_cache
 
-    def test_c1_02_restore_control_lines_header_bounded(self):
+    def test_restore_control_lines_header_bounded(self):
         """restore_control_lines bounds header restoration and stops at =yencryption."""
         from sabnzbd.encryption import DecryptionAdapter
 
@@ -1245,7 +1245,7 @@ class TestCycle1AdversarialRemediation:
         assert out_salt == salt
         assert out_idx == seg_idx
 
-    def test_c1_03_decoder_adapter_cached_on_nzo(self):
+    def test_decoder_adapter_cached_on_nzo(self):
         """_get_decryption_adapter caches DecryptionAdapter on nzo to eliminate churn."""
         import threading
         import sabnzbd.decoder as decoder
@@ -1274,7 +1274,7 @@ class TestCycle1AdversarialRemediation:
         assert adapter1 is adapter2
         assert mock_nzo._decryption_adapter is adapter1
 
-    def test_c1_04_direct_write_sink_leakage_fails_closed(self):
+    def test_direct_write_sink_leakage_fails_closed(self):
         """Direct-write sink on encrypted article raises SinkFailed and fails closed."""
         import sabctools
         import sabnzbd.decoder as decoder
@@ -1323,7 +1323,7 @@ class TestCycle1AdversarialRemediation:
             assert not mock_cache.save_article.called
             mock_queue.register_article.assert_called_with(article, False)
 
-    def test_c1_06_dual_index_mismatch_in_body_encrypted_article(self):
+    def test_dual_index_mismatch_in_body_encrypted_article(self):
         """Dual index mismatch between the cached segment_index and the wire header raises ValueError."""
         import sabctools
         import sabnzbd.decoder as decoder
@@ -1349,7 +1349,7 @@ class TestCycle1AdversarialRemediation:
         with pytest.raises(ValueError, match="Dual index mismatch: cached segment_index 1 != wire index 2"):
             decoder.decode_yenc(article, response)
 
-    def test_c1_07_bad_data_zero_output_guarantee(self):
+    def test_bad_data_zero_output_guarantee(self):
         """BadData on encrypted article discards data and preserves zero-output guarantee."""
         import sabctools
         import sabnzbd.decoder as decoder
@@ -1378,7 +1378,7 @@ class TestCycle1AdversarialRemediation:
             assert not article.on_disk
             mock_queue.register_article.assert_called_with(article, False)
 
-    def test_c1_08_split_lines_preserving_endings(self):
+    def test_split_lines_preserving_endings(self):
         """split_lines_preserving_endings handles unterminated and empty inputs cleanly."""
         from sabnzbd.encryption import split_lines_preserving_endings
 
@@ -1392,7 +1392,7 @@ class TestCycle1AdversarialRemediation:
         # Empty input
         assert split_lines_preserving_endings(b"") == []
 
-    def test_in03_r4_split_lines_sub_bootstrap_non_y_input(self):
+    def test_split_lines_sub_bootstrap_non_y_input(self):
         """Sub-BOOTSTRAP_PREFIX_LEN non-'=y' input is one truncated Line 1 (Rust parity)."""
         from sabnzbd.encryption import BOOTSTRAP_PREFIX_LEN, split_lines_preserving_endings
 
@@ -1414,7 +1414,7 @@ class TestCycle1AdversarialRemediation:
         assert len(lines2) == 1
         assert lines2[0] == raw2
 
-    def test_c2_01_restore_control_lines_min_lines_truncated(self):
+    def test_restore_control_lines_min_lines_truncated(self):
         """restore_control_lines rejects truncated blocks below min line count."""
         from sabnzbd.encryption import DecryptionAdapter
 
@@ -1432,7 +1432,7 @@ class TestCycle1AdversarialRemediation:
         with pytest.raises(ValueError, match="Article block too short for encrypted yEnc"):
             adapter.restore_control_lines(truncated_single, seg_idx)
 
-    def test_c2_02_restore_control_lines_strict_sequence(self):
+    def test_restore_control_lines_strict_sequence(self):
         """restore_control_lines strictly validates header sequence and missing =yencryption."""
         from sabnzbd.encryption import DecryptionAdapter
 
@@ -1473,7 +1473,7 @@ class TestCycle1AdversarialRemediation:
         with pytest.raises(ValueError, match="Multipart line 2 does not start with =ypart"):
             adapter.restore_control_lines(bad_multi, seg_idx)
 
-    def test_c2_03_restore_control_lines_trailing_blank_lines(self):
+    def test_restore_control_lines_trailing_blank_lines(self):
         """restore_control_lines handles trailing blank lines after footer without crashing."""
         from sabnzbd.encryption import DecryptionAdapter
 
@@ -1508,7 +1508,7 @@ class TestCycle1AdversarialRemediation:
         assert out_salt == salt
         assert out_idx == seg_idx
 
-    def test_c2_04_extract_bootstrap_line1_max_length(self):
+    def test_extract_bootstrap_line1_max_length(self):
         """extract_bootstrap_from_line1 enforces upper bound on line 1 length."""
         from sabnzbd.encryption import extract_bootstrap_from_line1
 
@@ -1527,7 +1527,7 @@ class TestCycle1AdversarialRemediation:
         with pytest.raises(ValueError, match="Line 1 too long"):
             extract_bootstrap_from_line1(line_too_long)
 
-    def test_c2_05_decoder_dual_index_mismatch_fails_closed(self):
+    def test_decoder_dual_index_mismatch_fails_closed(self):
         """decode_article fails closed when the cached segment_index disagrees with the wire index."""
         import sabctools
         import sabnzbd.decoder as decoder
@@ -1571,7 +1571,7 @@ class TestCycle1AdversarialRemediation:
         with pytest.raises(ValueError, match="Dual index mismatch"):
             decoder.decode_yenc(mock_article, mock_response)
 
-    def test_c3_02_wire_crc_error_raises_valueerror_for_encrypted_article(self):
+    def test_wire_crc_error_raises_valueerror_for_encrypted_article(self):
         """decode_yenc raises ValueError on CRC error for encrypted article without saving BadData."""
         import sabctools
         import sabnzbd.decoder as decoder
@@ -1600,7 +1600,7 @@ class TestCycle1AdversarialRemediation:
         with pytest.raises(ValueError, match="UNAUTHENTICATED_ARTICLE"):
             decoder.decode_yenc(article, response)
 
-    def test_c3_03_baddata_discard_on_standalone_article(self):
+    def test_baddata_discard_on_standalone_article(self):
         """BadData on standalone article with article.yenc_encrypted discards data."""
         import sabctools
         import sabnzbd.decoder as decoder
@@ -2077,7 +2077,7 @@ class TestStructuralNoPasswordEncryptedWire:
             assert not mock_cache.save_article.called
             assert not article.on_disk
 
-    def test_wr05_r4_authenticated_empty_segment_counts_as_decoded(self):
+    def test_authenticated_empty_segment_counts_as_decoded(self):
         """An authenticated zero-length plaintext is decoded/complete —
         it must never be marked on_disk with zero bytes written."""
         import sabctools

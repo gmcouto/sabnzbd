@@ -237,7 +237,7 @@ class TestNzbFile:
         nzo_restored: NzbObject = pickle.loads(pickle.dumps(nzo))
         assert nzo_restored.yenc_encrypted is True
 
-    def test_c2_06_nzbfile_and_article_unpickle_safe_none_and_lock_rebind(self):
+    def test_nzbfile_and_article_unpickle_safe_none_and_lock_rebind(self):
         """NzbFile unpickling tolerates None for articles/decodetable and Article rebinds lock to nzf."""
         nzo = NzbObject("test_c2_06")
         nzf = NzbFile(
@@ -270,7 +270,7 @@ class TestNzbFile:
         assert restored_nzf.articles == {}
         assert restored_nzf.decodetable == []
 
-    def test_c2_07_nzo_attribute_saver_preserves_yenc_encrypted(self):
+    def test_nzo_attribute_saver_preserves_yenc_encrypted(self):
         """NzoAttributeSaver and load_attribs preserve yenc_encrypted across job retry."""
         from sabnzbd.nzb.object import NzoAttributeSaver
 
