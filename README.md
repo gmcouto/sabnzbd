@@ -51,8 +51,8 @@ Our many other command line options are explained in depth [here](https://sabnzb
 ## yEnc Header and Body Decryption
 
 SABnzbd supports downloading releases protected by yEnc body and control-line encryption
-(XChaCha20-Poly1305 and Radix 253 FF1) conforming to the experimental v1.2 Self-Describing
-Article Bootstrap Standard.
+(XChaCha20-Poly1305 and Radix 253 FF1) conforming to the experimental v1.2 yEnc Body
+Encryption and yEnc Control Lines Encryption Standards.
 
 - **Self-Describing Article Wire Bootstrap**: Downloader extracts the 16-byte raw salt and uint32_be
   `segmentIndex` from the 20-byte Line 1 prefix (`[16B salt][4B uint32_be(segmentIndex)]`) and verifies
