@@ -209,7 +209,7 @@ NzbObjectSaver = (
     "time_added",
 )
 
-NzoAttributeSaver = ("cat", "pp", "script", "priority", "final_name", "password", "url", "yenc_encrypted")
+NzoAttributeSaver = ("cat", "pp", "script", "priority", "final_name", "password", "url")
 
 
 class NzbObject(TryList):
@@ -1625,9 +1625,6 @@ class NzbObject(TryList):
             # Only set if it is present and has a value
             if attribs.get(attrib):
                 setattr(self, attrib, attribs[attrib])
-
-        if attribs.get("yenc_encrypted") is not None:
-            self.yenc_encrypted = bool(attribs["yenc_encrypted"])
 
         # Only set password if it wasn't already set
         if not self.password and attribs.get("password"):

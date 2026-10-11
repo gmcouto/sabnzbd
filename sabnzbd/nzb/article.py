@@ -76,12 +76,9 @@ class TryList:
 
     def __setstate__(self, servers_ids: list[str]):
         self.try_list = set()
-        # Downloader may be absent when restoring pickled articles outside a running
-        # daemon (e.g. admin-state reload during tests/retry before connect)
-        if hasattr(sabnzbd, "Downloader") and sabnzbd.Downloader and hasattr(sabnzbd.Downloader, "servers"):
-            for server in sabnzbd.Downloader.servers:
-                if server.id in servers_ids:
-                    self.add_to_try_list(server)
+        for server in sabnzbd.Downloader.servers:
+            if server.id in servers_ids:
+                self.add_to_try_list(server)
 
 
 ##############################################################################
@@ -101,8 +98,6 @@ ArticleSaver = (
     "nzf",
     "crc32",
     "decoded_size",
-    "part_number",
-    "segment_index",
 )
 
 
@@ -112,13 +107,7 @@ class Article(TryList):
     # Pre-define attributes to save memory
     __slots__ = (*ArticleSaver, "fetcher", "fetcher_priority", "tries", "lock")
 
-    def __init__(
-        self,
-        article,
-        article_bytes,
-        nzf,
-        part_number: Optional[int] = None,
-    ):
+    def __init__(self, article, article_bytes, nzf):
         super().__init__()
         self.article: str = article
         self.art_id: Optional[str] = None
@@ -138,9 +127,6 @@ class Article(TryList):
         self.nzf: sabnzbd.nzb.NzbFile = nzf  # NzbFile reference
         # Share NzbFile lock for file-wide atomicity of try-list ops
         self.lock: threading.RLock = nzf.lock
-        self.part_number: Optional[int] = part_number
-        # Post-decode cache of the segment index read from the article bootstrap bytes
-        self.segment_index: Optional[int] = None
 
     @synchronized()
     def reset_try_list(self):
@@ -232,10 +218,7 @@ class Article(TryList):
             except KeyError:
                 # Handle new attributes
                 setattr(self, item, None)
-        if self.nzf and hasattr(self.nzf, "lock") and self.nzf.lock is not None:
-            self.lock = self.nzf.lock
-        else:
-            self.lock = threading.RLock()
+        self.lock = threading.RLock()
         super().__setstate__(dict_.get("try_list", []))
         self.fetcher = None
         self.fetcher_priority = 0

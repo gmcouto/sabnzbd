@@ -106,60 +106,6 @@ def cbc_mac(aes_enc, data: bytes) -> bytes:
     return block
 
 
-def ff1_encrypt_numerals(key: bytes, tweak: bytes, numerals: list[int], radix: int = 253) -> list[int]:
-    """NIST SP 800-38G FF1 Encryption over arbitrary numeral strings."""
-    backend = Cipher(algorithms.AES(key), modes.ECB()).encryptor()
-    aes_enc = backend.update
-    n = len(numerals)
-    t = len(tweak)
-    u = n // 2
-    v = n - u
-    b = math.ceil(math.ceil(v * math.log2(radix)) / 8)
-    d = 4 * math.ceil(b / 4) + 4
-
-    p = bytearray(16)
-    p[0], p[1], p[2] = 1, 2, 1
-    p[3:6] = radix.to_bytes(3, "big")
-    p[6] = 10
-    p[7] = u % 256
-    p[8:12] = n.to_bytes(4, "big")
-    p[12:16] = t.to_bytes(4, "big")
-
-    pad_len = ((-t - b - 1) % 16 + 16) % 16
-    q_prefix = tweak + bytes(pad_len)
-
-    A = list(numerals[:u])
-    B = list(numerals[u:])
-
-    for i in range(10):
-        q = q_prefix + bytes([i]) + num_radix(B, radix).to_bytes(b, "big")
-        R = cbc_mac(aes_enc, bytes(p) + q)
-        S = bytearray(R)
-        j = 1
-        while len(S) < d:
-            j_bytes = j.to_bytes(16, "big")
-            blk = bytes(a ^ b for a, b in zip(R, j_bytes))
-            S.extend(aes_enc(blk))
-            j += 1
-        y = int.from_bytes(S[:d], "big")
-        m = u if i % 2 == 0 else v
-        c = (num_radix(A, radix) + y) % (radix**m)
-        C = str_radix(c, radix, m)
-        A = B
-        B = C
-
-    return A + B
-
-
-def ff1_encrypt(key: bytes, tweak: bytes, plaintext_bytes: bytes, radix: int = 253) -> bytes:
-    """Encrypt control line byte string using FF1 over Radix 253 Alphabet."""
-    if len(plaintext_bytes) < 2:
-        raise YEncEncryptionCryptoError(f"Line too short: {len(plaintext_bytes)} bytes (minimum 2)")
-    numerals = [byte_to_numeral(b) for b in plaintext_bytes]
-    ct_numerals = ff1_encrypt_numerals(key, tweak, numerals, radix)
-    return bytes(numeral_to_byte(i) for i in ct_numerals)
-
-
 def ff1_decrypt_numerals(key: bytes, tweak: bytes, numerals: list[int], radix: int = 253) -> list[int]:
     """NIST SP 800-38G FF1 Decryption over arbitrary numeral strings."""
     backend = Cipher(algorithms.AES(key), modes.ECB()).encryptor()
@@ -375,15 +321,6 @@ def extract_bootstrap_from_line1(line1: bytes) -> tuple[bytes, int]:
     return salt, segment_index
 
 
-def extract_salt_from_line1(line1: bytes) -> bytes:
-    """Extract and validate 16-byte salt from control line 1 (backward-compatible helper).
-
-    Delegates to extract_bootstrap_from_line1 and returns only the salt.
-    """
-    salt, _ = extract_bootstrap_from_line1(line1)
-    return salt
-
-
 def split_lines_preserving_endings(input_bytes: bytes) -> list[bytes]:
     """Split bytes into lines while preserving \r\n or \n endings.
 
@@ -471,9 +408,6 @@ class DecryptionAdapter:
             self._key_cache[salt] = key
             return key
 
-    def derive_key(self, salt: bytes) -> bytes:
-        return self.get_master_key(salt)
-
     def derive_body_nonce(self, key: bytes, segment_index: int) -> bytes:
         """Derive 24-byte nonce for XChaCha20-Poly1305 via 19-byte HMAC-SHA256 layout."""
         if not (0 <= segment_index <= 0xFFFFFFFF):
@@ -503,15 +437,11 @@ class DecryptionAdapter:
             # Zero-output guarantee: release zero bytes
             raise YEncEncryptionCryptoError(f"Poly1305 authentication failed: {e}") from e
 
-    def encrypt_control_line(self, plaintext: bytes, enc_key: bytes, tweak: bytes, radix: int = 253) -> bytes:
-        """Encrypt a single control line with FF1 over Radix 253."""
-        return ff1_encrypt(enc_key, tweak, plaintext, radix)
-
     def decrypt_control_line(self, ciphertext: bytes, enc_key: bytes, tweak: bytes, radix: int = 253) -> bytes:
         """Decrypt a single control line with FF1 over Radix 253."""
         return ff1_decrypt(enc_key, tweak, ciphertext, radix)
 
-    def restore_control_lines(self, yenc_block: bytes, segment_index: Optional[int] = None) -> tuple[bytes, bytes, int]:
+    def restore_control_lines(self, yenc_block: bytes) -> tuple[bytes, bytes, int]:
         """Restore encrypted control lines in a yEnc article block per Standard v1.2.
 
         Returns (restored_yenc_block, salt, segment_index).
@@ -546,10 +476,6 @@ class DecryptionAdapter:
 
         # Line 1: first 20 bytes is bootstrap prefix ([16B salt][4B uint32_be(segmentIndex)])
         salt, line1_segment_index = extract_bootstrap_from_line1(line1_content)
-        if segment_index is not None and segment_index != line1_segment_index:
-            raise YEncEncryptionCryptoError(
-                f"Dual index mismatch: caller specified {segment_index} but line 1 bootstrap contains {line1_segment_index}"
-            )
 
         ct1 = line1_content[BOOTSTRAP_PREFIX_LEN:]
         master_key = self.get_master_key(salt)

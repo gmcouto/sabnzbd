@@ -123,8 +123,6 @@ class Assembler(Thread):
 
     def remove_ready_bytes(self, article: Article) -> None:
         """Stop tracking an article, its data is now on disk"""
-        if not article.decoded_size:
-            return
         nzf_id = article.nzf.nzf_id
         with self.ready_bytes_lock:
             # Could already be gone, for example when the file was finished or the job was removed
@@ -473,7 +471,7 @@ class Assembler(Thread):
                 # Could be empty in case nzo was deleted or a previous write attempt failed and the data was removed
                 # from the cache but could not be written to disk.
                 data = load_article(article)
-                if data is None:
+                if not data:
                     logging.info("No data found when trying to write %s", article)
                     continue
 

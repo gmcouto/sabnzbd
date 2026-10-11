@@ -22,7 +22,6 @@ sabnzbd.nzbparser - Parse and import NZB files
 import os
 import bz2
 import gzip
-import re
 import time
 import logging
 import hashlib
@@ -385,7 +384,7 @@ def process_single_nzb(
     return result, nzo_ids
 
 
-def nzbfile_parser(full_nzb_path: str, nzo, force_encrypted: bool = False):
+def nzbfile_parser(full_nzb_path: str, nzo):
     # For type-hinting
     nzo: NzbObject
 
@@ -399,7 +398,6 @@ def nzbfile_parser(full_nzb_path: str, nzo, force_encrypted: bool = False):
     time_now = time.time()
     skipped_files = 0
     valid_files = 0
-    parsed_files = []
 
     # Use nzb.gz file from admin dir
     with gzip.open(full_nzb_path) as nzb_fh:
@@ -477,7 +475,7 @@ def nzbfile_parser(full_nzb_path: str, nzo, force_encrypted: bool = False):
                                 logging.info("Skipping article %s due to strange size (%s)", article_id, segment_size)
                                 nzo.increase_bad_articles_counter("bad_articles")
                             else:
-                                raw_article_db[partnum] = (article_id, segment_size, partnum)
+                                raw_article_db[partnum] = (article_id, segment_size)
                                 file_bytes += segment_size
                         except Exception:
                             # In case of missing attributes
@@ -486,92 +484,23 @@ def nzbfile_parser(full_nzb_path: str, nzo, force_encrypted: bool = False):
                 # Skip any empty files
                 if not raw_article_db:
                     logging.info("No valid articles in %s, skipping", file_name)
-                    element.clear()
                     continue
 
-                sorted_articles = [
-                    (article_id, segment_size, partnum)
-                    for partnum, (article_id, segment_size, _partnum) in sorted(raw_article_db.items())
-                ]
+                # Get the articles, making sure to sort the articles by part number
+                raw_article_db_sorted = [raw_article_db[partnum] for partnum in sorted(raw_article_db)]
 
-                # Extract file_ordinal and total_files if subject has [N/M]
-                file_ordinal = None
-                total_files = None
-                if m := re.search(r"\[(\d+)/(\d+)\]", file_name):
-                    try:
-                        file_ordinal = int(m.group(1))
-                        total_files = int(m.group(2))
-                    except ValueError:
-                        pass
+                # Create NZF
+                try:
+                    nzf = NzbFile(file_date, file_name, raw_article_db_sorted, file_bytes, nzo)
+                except SkippedNzbFile:
+                    # Did not meet requirements, so continue
+                    skipped_files += 1
+                    continue
 
-                parsed_files.append(
-                    {
-                        "date": file_date,
-                        "timestamp": file_timestamp,
-                        "file_name": file_name,
-                        "bytes": file_bytes,
-                        "raw_articles": sorted_articles,
-                        "file_ordinal": file_ordinal,
-                        "total_files": total_files,
-                    }
-                )
+                nzo.add_nzf(nzf)
+                valid_files += 1
+                avg_age_sum += file_timestamp
                 element.clear()
-
-        # Determine encryption mode. Segment identity lives solely in the per-article
-        # bootstrap bytes (Line 1) per Standard v1.2, so none is derived from the NZB here.
-        explicit_yenc = any(v.lower() == "true" for v in nzo.meta.get("yenc_encrypted", []))
-        is_encrypted = (
-            force_encrypted
-            or getattr(nzo, "force_encrypted", False)
-            or getattr(nzo, "yenc_encrypted", False)
-            or explicit_yenc
-        )
-
-        if is_encrypted:
-            if "yenc_encrypted" not in nzo.meta:
-                nzo.meta["yenc_encrypted"] = []
-            if "true" not in nzo.meta["yenc_encrypted"]:
-                nzo.meta["yenc_encrypted"].append("true")
-            nzo.yenc_encrypted = True
-
-            # Ingest-time structural validation (METADATA_VALIDATION tier): an encrypted
-            # NZB without a password can never be decrypted, so fail the job HERE - before
-            # queue admission and before any article scheduling or NNTP contact. The
-            # decode-time check in encryption.get_master_key remains as defense-in-depth.
-            raw_meta_passwords = nzo.meta.get("password") or []
-            if isinstance(raw_meta_passwords, str):
-                raw_meta_passwords = [raw_meta_passwords]
-            has_meta_pw = any(isinstance(p, str) and p.strip() for p in raw_meta_passwords)
-            attr_pw = getattr(nzo, "password", None)
-            has_attr_pw = isinstance(attr_pw, str) and bool(attr_pw.strip())
-
-            if not (has_meta_pw or has_attr_pw):
-                raise YEncEncryptionStructuralError(
-                    "MISSING_PASSWORD: NZB declares yenc_encrypted=true but no password meta was supplied"
-                )
-
-        # Build final raw_article_db_sorted and create NzbFiles
-        for f in parsed_files:
-            raw_article_db_sorted = [(art[0], art[1], art[2]) for art in f["raw_articles"]]
-
-            try:
-                nzf = NzbFile(
-                    f["date"],
-                    f["file_name"],
-                    raw_article_db_sorted,
-                    f["bytes"],
-                    nzo,
-                    file_ordinal=f["file_ordinal"],
-                    total_files=f["total_files"],
-                )
-            except SkippedNzbFile:
-                # Did not meet requirements, so continue
-                skipped_files += 1
-                continue
-
-            nzo.add_nzf(nzf)
-            valid_files += 1
-            avg_age_sum += f["timestamp"]
 
     # Final bookkeeping
     nr_files = max(1, valid_files)
@@ -581,3 +510,17 @@ def nzbfile_parser(full_nzb_path: str, nzo, force_encrypted: bool = False):
 
     if skipped_files:
         logging.warning(T("Failed to import %s files from %s"), skipped_files, nzo.filename)
+
+    if any(v.lower() == "true" for v in nzo.meta.get("yenc_encrypted", [])):
+        nzo.yenc_encrypted = True
+        raw_meta_passwords = nzo.meta.get("password") or []
+        if isinstance(raw_meta_passwords, str):
+            raw_meta_passwords = [raw_meta_passwords]
+        has_meta_pw = any(isinstance(p, str) and p.strip() for p in raw_meta_passwords)
+        attr_pw = getattr(nzo, "password", None)
+        has_attr_pw = isinstance(attr_pw, str) and bool(attr_pw.strip())
+
+        if not (has_meta_pw or has_attr_pw):
+            raise YEncEncryptionStructuralError(
+                "MISSING_PASSWORD: NZB declares yenc_encrypted=true but no password meta was supplied"
+            )

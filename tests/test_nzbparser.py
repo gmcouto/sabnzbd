@@ -75,6 +75,14 @@ class TestNzbParser:
         for field in metadata:
             assert [metadata[field]] == nzo.meta[field]
 
+    @pytest.mark.xfail(reason="These tests should be added")
+    def test_nzbparser_bad_stuff(self):
+        # TODO: Add tests for:
+        #  Duplicate parts
+        #  Strange articles sizes
+        #  Correct parsing of dates
+        assert False
+
     @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
     def test_nzb_segment_identity_conformance(self):
         vectors_path = os.path.join(
@@ -96,14 +104,11 @@ class TestNzbParser:
                 nzf.finish_import()
 
             articles = [art for nzf in nzo.files for art in nzf.decodetable]
-            # Segment identity lives only in the article bootstrap bytes (Standard v1.2),
-            # so nothing about it is known at NZB ingest.
-            assert all(art.segment_index is None for art in articles), vector_id
             assert nzo.yenc_encrypted is (vector["category"] != "unencrypted_compatibility"), vector_id
 
             if expected_segments := vector.get("expected_segments"):
-                parsed = sorted((art.article, art.part_number, art.bytes) for art in articles)
-                expected = sorted((seg["message_id"], seg["part"], seg["bytes"]) for seg in expected_segments)
+                parsed = sorted((art.article, art.bytes) for art in articles)
+                expected = sorted((seg["message_id"], seg["bytes"]) for seg in expected_segments)
                 assert parsed == expected, vector_id
 
     @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
@@ -138,16 +143,12 @@ class TestNzbParser:
         archive_nzo.files[0].finish_import()
         assert archive_nzo.meta["password"] == ["archive_pass"]
         assert archive_nzo.yenc_encrypted is False
-        assert archive_nzo.files[0].decodetable[0].segment_index is None
 
         encrypted_nzo = NzbObject("encrypted")
         nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, "encrypted", encrypted_xml), encrypted_nzo)
         encrypted_nzo.files[0].finish_import()
         assert encrypted_nzo.meta["password"] == ["enc_pass"]
         assert encrypted_nzo.yenc_encrypted is True
-        # Bootstrap-only identity: no XML index consumption; identity comes from the
-        # wire Line-1 bootstrap at decode time, so it is absent at ingest.
-        assert encrypted_nzo.files[0].decodetable[0].segment_index is None
 
         # Explicit yenc_encrypted without password meta is a structural error at ingest
         from sabnzbd.encryption import YEncEncryptionStructuralError
@@ -206,66 +207,3 @@ class TestNzbParser:
         # The password metadata must still be present in nzo.meta for downstream consumption
         assert nzo.meta.get("password") == [secret_sentinel]
         assert nzo.meta.get("category") == ["movies"]
-
-
-@pytest.mark.config({"download_dir": SAB_CACHE_DIR})
-def test_index_allocation_conformance():
-    """Dedicated loader/dispatch for the vendored index_allocation.json (index framing rule).
-
-    These vectors describe uploader-side index allocation and are NOT NZB-shaped, so they
-    are asserted directly on allocation schema rather than routed through nzbfile_parser.
-    """
-    vectors_path = os.path.join(os.path.dirname(__file__), "data/test-vectors/index_allocation.json")
-    with open(vectors_path, encoding="utf-8") as vectors_file:
-        vectors = json.load(vectors_file)["vectors"]
-
-    assert len(vectors) == 4
-
-    for vec in vectors:
-        assert vec["category"] == "index_allocation"
-        candidate = vec["candidate_index"]
-        assigned = vec["expected_assigned_index"]
-
-        if vec["expected_error"] is None:
-            # Candidate forbidden (uint32_be contains 0x0A/0x0D) or itself forbidden:
-            # assigned index must be safe and strictly greater than the candidate
-            candidate_bytes = candidate.to_bytes(4, "big")
-            forbidden = any(b in (0x0A, 0x0D) for b in candidate_bytes)
-            if forbidden:
-                assert assigned > candidate
-            assigned_bytes = assigned.to_bytes(4, "big")
-            assert not any(b in (0x0A, 0x0D) for b in assigned_bytes), "assigned index violates the framing rule"
-            assert assigned_bytes.hex() == vec["expected_index_hex"]
-
-
-@pytest.mark.config({"download_dir": SAB_CACHE_DIR})
-def test_subject_prefix_file_ordinal_extraction():
-    """[N/M] subject prefix is extracted into structured nzf.file_ordinal/total_files."""
-    plain_xml = """<?xml version="1.0" encoding="utf-8"?>
-<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
- <head><meta type="password">pw</meta></head>
- <file poster="p@test.com" date="1600000000" subject="&quot;no_prefix.bin&quot; yEnc (1/1)">
-  <segments><segment bytes="1000" number="1">np1@test</segment></segments>
- </file>
-</nzb>"""
-    prefixed_xml = """<?xml version="1.0" encoding="utf-8"?>
-<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
- <head><meta type="password">pw</meta></head>
- <file poster="p@test.com" date="1600000000" subject="[2/3] &quot;prefixed.bin&quot; yEnc (1/1)">
-  <segments><segment bytes="1000" number="1">pf1@test</segment></segments>
- </file>
-</nzb>"""
-
-    # Subject without an [N/M] prefix: no ordinal metadata
-    plain_nzo = NzbObject("plain")
-    nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, "ordinal_plain", plain_xml), plain_nzo)
-    assert len(plain_nzo.files) == 1
-    assert plain_nzo.files[0].file_ordinal is None
-    assert plain_nzo.files[0].total_files is None
-
-    # Subject with [2/3]: structured extraction, filename keeps the prefix (subject unchanged)
-    prefixed_nzo = NzbObject("prefixed")
-    nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, "ordinal_prefixed", prefixed_xml), prefixed_nzo)
-    assert len(prefixed_nzo.files) == 1
-    assert prefixed_nzo.files[0].file_ordinal == 2
-    assert prefixed_nzo.files[0].total_files == 3

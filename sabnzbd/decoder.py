@@ -72,11 +72,7 @@ class SinkFailed(Exception):
 
 def _is_yenc_encrypted(article: Article) -> bool:
     """Whether the article belongs to a yEnc-encrypted release (not merely password-protected)."""
-    return (
-        bool(getattr(getattr(getattr(article, "nzf", None), "nzo", None), "yenc_encrypted", False))
-        or getattr(article, "segment_index", None) is not None
-        or bool(getattr(article, "yenc_encrypted", False))
-    )
+    return bool(getattr(getattr(getattr(article, "nzf", None), "nzo", None), "yenc_encrypted", False))
 
 
 def _get_decryption_adapter(article: Article, password: Optional[str]):
@@ -133,12 +129,8 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
         if search_new_server(article):
             return
 
-        if _is_yenc_encrypted(article):
-            logging.info("Discarding corrupt encrypted article data for %s (zero-output guarantee)", art_id)
-            decoded_data = None
-        else:
-            # Store data, maybe par2 can still fix it
-            decoded_data = error.data
+        # Store data, maybe par2 can still fix it
+        decoded_data = error.data
 
     except BadUu:
         logging.info("Badly formed uu article in %s", art_id)
@@ -147,32 +139,20 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
         if search_new_server(article):
             return
 
-    except YEncEncryptionStructuralError:
-        # Structural metadata failure (missing password, unsupported mode): abort the
-        # job - never retried against another server. No plaintext or ciphertext was
-        # released (zero-output guarantee), so nothing is stored.
-        logging.error(T("Structural yEnc-encryption failure in %s: job aborted (not retryable)"), art_id)
+    except YEncEncryptionStructuralError as error:
+        # Structural metadata failure (missing password, unsupported mode): fail the
+        # article without trying other servers (job-terminal METADATA_VALIDATION tier).
+        logging.error(T("Structural yEnc-encryption failure in %s: %s"), art_id, error)
         nzo.fail_msg = T("Structural yEnc-encryption failure: missing or invalid metadata")
         nzo.set_unpack_info("Download", nzo.fail_msg)
+        article_success = False
         decoded_data = None
-        # Same bookkeeping the retry-exhaustion path performs (register the failed
-        # article, never a server search), then abort the job immediately instead of
-        # letting the article burn its retries first: no other server can supply
-        # valid metadata (job-terminal METADATA_VALIDATION tier). register_article
-        # may itself end the job when the file completes; the guarded helper detects
-        # that and only fires when the job is still active.
-        sabnzbd.NzbQueue.register_article(article, article_success)
-        _end_job_on_structural_error(nzo, art_id)
-        return
 
     except YEncEncryptionCryptoError:
         # Crypto/structural wire failure on encrypted articles (authentication failure,
         # FF1 control-line decrypt failure, corrupt bootstrap): log without secrets and
         # query next server (retryable provider corruption). Unencrypted articles that
-        # raise this class stay eligible for search_new_server too. Plain ValueError is
-        # deliberately NOT caught: a programming error must surface instead of being
-        # retried as provider corruption. When servers are exhausted, cleanly fall
-        # through to register failure.
+        # raise this class stay eligible for search_new_server too.
         if _is_yenc_encrypted(article):
             logging.info("Authentication failed for %s, trying next server", art_id)
         else:
@@ -206,7 +186,7 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
         article.allow_new_fetcher()
         return
 
-    except BadYenc:
+    except (BadYenc, ValueError):
         # Handles precheck and badly formed articles
         if nzo.precheck and decoder.status_code == 223:
             # STAT was used, so we only get a status code
@@ -249,15 +229,16 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
     # plaintext, which the encrypted-wire path legitimately yields for empty
     # segments). An empty-but-complete article must count as decoded, never fall
     # through to the on_disk branch with zero bytes written anywhere.
-    if decoded_data is not None and len(decoded_data) > 0:
+    if decoded_data:
         # If the data needs to be written to disk due to full cache, this will be slow
         # Causing the decoder-queue to fill up and delay the downloader
         sabnzbd.ArticleCache.save_article(article, decoded_data)
         article.decoded = True
-    elif decoded_data is not None:
-        # Authenticated empty segment: complete, nothing to cache or assemble.
+    elif decoded_data is not None and _is_yenc_encrypted(article):
+        # Authenticated empty segment: complete, nothing cached or assembled. Marked
+        # decoded (not on_disk) so the assembler advances without stalling on
+        # unwritten data.
         article.decoded = True
-        article.on_disk = True
     elif not nzo.precheck and (article_success or not _is_yenc_encrypted(article)):
         # Either there was nothing to save, or the decoder streamed it straight to the
         # file. Both are on disk as far as the rest of the pipeline is concerned; the
@@ -288,30 +269,10 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
 
     nzf = article.nzf
 
-    password = None
-    if hasattr(article, "nzf") and hasattr(article.nzf, "nzo"):
-        password = getattr(article.nzf.nzo, "password", None)
-    if not password and hasattr(article, "password"):
-        password = article.password
-
-    # Defense-in-depth (structural tier): an encrypted-wire article (sabctools
-    # decoded nothing) in a declared-encrypted release with NO resolvable password is
-    # a structural metadata failure - missing password aborts the job and the article
-    # is never marked on_disk, so zero plaintext or ciphertext is ever released.
-    if (
-        response.bytes_decoded == 0
-        and getattr(response, "lines", None)
-        and not password
-        and _is_yenc_encrypted(article)
-    ):
-        from sabnzbd.encryption import YEncEncryptionStructuralError
-
-        raise YEncEncryptionStructuralError(
-            f"MISSING_PASSWORD: encrypted wire article {getattr(article, 'article', '')} has no resolvable password"
-        )
+    password = getattr(article.nzf.nzo, "password", None)
 
     # Encrypted wire response: sabctools couldn't decode because control lines were FF1-encrypted
-    if response.bytes_decoded == 0 and getattr(response, "lines", None) and password and _is_yenc_encrypted(article):
+    if response.bytes_decoded == 0 and getattr(response, "lines", None) and _is_yenc_encrypted(article):
         import io
         import sabctools
         from sabnzbd.encryption import extract_and_remove_yencryption
@@ -332,14 +293,6 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
         adapter = _get_decryption_adapter(article, password=password)
         restored_block, salt_line1, seg_idx_line1 = adapter.restore_control_lines(raw_wire)
         yenc_params, clean_yenc = extract_and_remove_yencryption(restored_block)
-
-        # Bootstrap-only identity: a cached index from a prior decode of this article
-        # must agree with the wire bootstrap; there is no XML-index preference.
-        cached_index = getattr(article, "segment_index", None)
-        if isinstance(cached_index, int) and cached_index != seg_idx_line1:
-            raise YEncEncryptionCryptoError(
-                f"Dual index mismatch: cached segment_index {cached_index} != wire index {seg_idx_line1}"
-            )
 
         if yenc_params["salt"] != salt_line1:
             raise YEncEncryptionCryptoError(
@@ -374,15 +327,13 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
             raise YEncEncryptionCryptoError(f"Wire CRC error in encrypted article {getattr(article, 'article', '')}")
 
         plaintext = adapter.decrypt_body(
-            ciphertext=bytes(sub_resp.data),
+            ciphertext=bytes(sub_resp.data or b""),
             tag=yenc_params["tag"],
             salt=yenc_params["salt"],
             segment_index=seg_idx_line1,
         )
 
         decoded_data = bytearray(plaintext)
-        if getattr(article, "segment_index", None) is None:
-            article.segment_index = seg_idx_line1
         article.file_size = sub_resp.file_size
         article.data_begin = sub_resp.part_begin
         article.data_size = sub_resp.part_size
@@ -409,80 +360,11 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
     # Assume it is yenc
     nzf.type = "yenc"
 
-    # Check for encrypted body if =yencryption metadata is present
-    yenc_info = getattr(response, "yencryption", None) or getattr(article, "yencryption", None)
-    if not yenc_info and getattr(response, "lines", None):
-        for line in response.lines:
-            if (isinstance(line, str) and line.startswith("=yencryption")) or (
-                isinstance(line, bytes) and line.startswith(b"=yencryption")
-            ):
-                yenc_info = line
-                break
-
-    parsed_enc = None
-    if yenc_info:
-        if isinstance(yenc_info, dict):
-            parsed_enc = yenc_info
-        elif isinstance(yenc_info, (str, bytes)):
-            from sabnzbd.encryption import parse_yencryption_line
-
-            try:
-                parsed_enc = parse_yencryption_line(yenc_info)
-            except Exception as e:
-                raise YEncEncryptionCryptoError(f"Malformed =yencryption line in article: {e}") from e
-        if not parsed_enc:
-            raise YEncEncryptionCryptoError(f"Malformed or unparsed =yencryption line in article: {yenc_info!r}")
-
-    if parsed_enc:
-        if decoded_data is None:
-            raise SinkFailed("Direct-write occurred on encrypted article before authentication")
-
-        if hasattr(article, "nzf") and hasattr(article.nzf, "nzo"):
-            article.nzf.nzo.yenc_encrypted = True
-
-        password = None
-        if hasattr(article, "nzf") and hasattr(article.nzf, "nzo"):
-            password = getattr(article.nzf.nzo, "password", None)
-        if not password and hasattr(article, "password"):
-            password = article.password
-
-        adapter = _get_decryption_adapter(article, password=password)
-        # Bootstrap-only identity: the wire =yencryption index field governs. Any cached
-        # article.segment_index from a prior decode attempt of the same article must
-        # agree; there is no XML-index preference anymore.
-        segment_index = parsed_enc.get("segment_index")
-        cached_index = getattr(article, "segment_index", None)
-        if segment_index is None:
-            raise YEncEncryptionCryptoError(
-                f"Missing explicit segment_index for encrypted article {getattr(article, 'article', '')}"
-            )
-        if cached_index is not None and cached_index != segment_index:
-            raise YEncEncryptionCryptoError(
-                f"Dual index mismatch: cached segment_index {cached_index} != wire index {segment_index}"
-            )
-
-        plaintext = adapter.decrypt_body(
-            ciphertext=bytes(decoded_data),
-            tag=parsed_enc["tag"],
-            salt=parsed_enc["salt"],
-            segment_index=segment_index,
-        )
-        if getattr(article, "segment_index", None) is None:
-            article.segment_index = segment_index
-        decoded_data = bytearray(plaintext)
-        article.decoded_size = len(decoded_data)
-        # Ciphertext CRC must not flow into any verification path
-        article.crc32 = None
-
-    # Zero-Output Rule (third enforcement site of the single shared rule, alongside
-    # pesto adapter.rs and nzbget ArticleDownloader.cpp): a release declared yEnc-encrypted
-    # must never accept a plain (never-authenticated) article. A substituted article is
-    # provider corruption - retriable tier per Control Std v1.2 §5 step 4b - so this raises
-    # plain ValueError, which decode() routes to search_new_server. Never a structural error,
-    # and never inside the if yenc_info: branch (the hole is precisely yenc_info is None).
-    # Gate strictly on _is_yenc_encrypted (declared-encrypted provenance), never on the
-    # archive-extraction password.
-    if not parsed_enc and _is_yenc_encrypted(article):
+    # Zero-Output Rule: a release declared yEnc-encrypted must never accept a plain
+    # (never-authenticated) article. A substituted article is provider corruption -
+    # retriable tier - so this raises YEncEncryptionCryptoError, which decode() routes
+    # to search_new_server. Never a structural error.
+    if _is_yenc_encrypted(article):
         raise YEncEncryptionCryptoError(
             f"UNAUTHENTICATED_ARTICLE: plain yEnc article {getattr(article, 'article', '')} in a yEnc-encrypted release"
         )
@@ -502,15 +384,11 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
     # CRC check
     if (crc := response.crc) is None:
         logging.info("CRC Error in %s", article.article)
-        if bool(parsed_enc) or _is_yenc_encrypted(article):
-            raise YEncEncryptionCryptoError(f"Wire CRC error in encrypted article {article.article}")
         # A streamed article is already on disk, so there is nothing to hand back; the
         # bytes stay put either way, so par2 has the same chance of repairing it
         raise BadData(decoded_data)
 
-    # On encrypted paths the wire CRC covers ciphertext - never persist it into
-    # any verification path (PAR2, quick-check, whole-file CRC folding)
-    article.crc32 = None if parsed_enc else crc
+    article.crc32 = crc
 
     return decoded_data
 
@@ -542,28 +420,6 @@ def decode_uu(article: Article, response: sabctools.NNTPResponse) -> bytearray:
     article.crc32 = response.crc
 
     return decoded_data
-
-
-def _end_job_on_structural_error(nzo: "sabnzbd.nzb.NzbObject", art_id: str) -> None:
-    """Abort the job immediately on a structural encryption error.
-
-    The structural tier is job-terminal (METADATA_VALIDATION): no other server can
-    supply valid metadata, so waiting for retry exhaustion would only burn the
-    article's tries before the queue ends the job anyway. Guarded, not swallowed:
-    a missing queue (never initialized, e.g. in tooling) or a job that already left
-    the download path is skipped, and any failure inside end_job is logged.
-    """
-    queue = getattr(sabnzbd, "NzbQueue", None)
-    if queue is None or getattr(nzo, "pp_or_finished", False) or getattr(nzo, "removed_from_queue", False):
-        # Queue not available or job already ended: the retry-exhaustion path still
-        # terminates the job later, so nothing is lost by deferring.
-        logging.debug("Skipping immediate structural abort of %s (queue unavailable or job already ended)", art_id)
-        return
-    try:
-        queue.end_job(nzo)
-    except Exception:
-        logging.error(T("Failed to abort job %s after structural yEnc-encryption failure"), nzo.final_name)
-        logging.info("Traceback: ", exc_info=True)
 
 
 def search_new_server(article: Article) -> bool:

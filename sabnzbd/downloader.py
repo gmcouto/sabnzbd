@@ -571,11 +571,7 @@ class Downloader(Thread):
 
         # Handle broken articles directly
         has_lines = bool(response and getattr(response, "lines", None))
-        is_encrypted = (
-            getattr(getattr(getattr(article, "nzf", None), "nzo", None), "yenc_encrypted", False)
-            or getattr(article, "segment_index", None) is not None
-            or getattr(article, "yenc_encrypted", False)
-        )
+        is_encrypted = bool(getattr(getattr(getattr(article, "nzf", None), "nzo", None), "yenc_encrypted", False))
 
         if not response or (
             not response.bytes_decoded and not article.nzf.nzo.precheck and not (has_lines and is_encrypted)

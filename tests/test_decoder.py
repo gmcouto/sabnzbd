@@ -245,50 +245,6 @@ class TestUuDecoder:
 class TestEncryptedCrcAndStructuralTier:
     """Regression tests for encrypted-path CRC clearing and the structural error tier."""
 
-    @staticmethod
-    def _make_encrypted_response(salt, tag, segment_index, ciphertext=b"dummy_ciphertext"):
-        response = mock.MagicMock(spec=sabctools.NNTPResponse)
-        response.sink_failed = False
-        response.format = sabctools.EncodingFormat.YENC
-        response.data = bytearray(ciphertext)
-        response.file_size = len(ciphertext)
-        response.part_begin = 0
-        response.part_size = len(ciphertext)
-        response.bytes_decoded = len(ciphertext)
-        response.file_name = "test.bin"
-        response.crc = 0xDEADBEEF  # ciphertext CRC from sabctools - must NOT propagate
-        response.lines = None
-        response.yencryption = {
-            "cipher": "XChaCha20-Poly1305",
-            "salt": salt,
-            "tag": tag,
-            "segment_index": segment_index,
-        }
-        return response
-
-    def test_crc_cleared_on_encrypted_body_path(self):
-        """Authenticated encrypted body path sets article.crc32 = None (ciphertext CRC dropped)."""
-        import sabnzbd.decoder as decoder
-
-        article = mock.MagicMock(spec=Article)
-        article.article = "crc_clear@enc"
-        article.nzf.nzo.password = "testpass"
-        article.nzf.filename_checked = True
-        article.lowest_partnum = False
-        article.segment_index = None
-
-        response = self._make_encrypted_response(b"\x01" * 16, b"\x02" * 16, 1)
-
-        with (
-            mock.patch("sabnzbd.encryption.DecryptionAdapter") as mock_adapter_cls,
-            mock.patch("sabnzbd.decoder._get_decryption_adapter", return_value=mock_adapter_cls.return_value),
-        ):
-            mock_adapter_cls.return_value.decrypt_body.return_value = b"plaintext"
-            decoded = decoder.decode_yenc(article, response)
-
-        assert decoded == bytearray(b"plaintext")
-        assert article.crc32 is None, "ciphertext CRC must never persist on encrypted paths"
-
     def test_crc_propagation_chain_skips_quick_check(self):
         """Full chain: article.crc32 None -> finalize_crc32 -> nzf.crc32 None -> quick-check skips CRC compare.
 
@@ -336,7 +292,6 @@ class TestEncryptedCrcAndStructuralTier:
         article.nzf.nzo.yenc_encrypted = True
         article.nzf.nzo.precheck = False
         article.nzf.nzo.password = None  # structural: no password
-        article.segment_index = None
         article.search_new_server.return_value = True  # must never be consulted
         article.on_disk = False
 

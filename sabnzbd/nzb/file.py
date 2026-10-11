@@ -68,8 +68,6 @@ NzbFileSaver = (
     "crc32",
     "assembled",
     "md5of16k",
-    "file_ordinal",
-    "total_files",
 )
 
 
@@ -79,16 +77,7 @@ class NzbFile(TryList):
     # Pre-define attributes to save memory
     __slots__ = (*NzbFileSaver, "lock", "file_lock", "assembler_next_index", "writer")
 
-    def __init__(
-        self,
-        date,
-        subject,
-        raw_article_db,
-        file_bytes,
-        nzo,
-        file_ordinal: Optional[int] = None,
-        total_files: Optional[int] = None,
-    ):
+    def __init__(self, date, subject, raw_article_db, file_bytes, nzo):
         """Setup object"""
         super().__init__()
         self.lock: threading.RLock = threading.RLock()
@@ -100,9 +89,6 @@ class NzbFile(TryList):
         self.filename: str = sanitize_filename(subject_name_extractor(subject))
         self.filename_checked = False
         self.filepath: Optional[str] = None
-
-        self.file_ordinal: Optional[int] = file_ordinal
-        self.total_files: Optional[int] = total_files
 
         # Identifiers for par2 files
         self.is_par2: bool = False
@@ -181,8 +167,7 @@ class NzbFile(TryList):
     @synchronized()
     def add_article(self, article_info):
         """Add article to object database and return article object"""
-        part_number = article_info[2] if len(article_info) > 2 else None
-        article = Article(article_info[0], article_info[1], self, part_number=part_number)
+        article = Article(article_info[0], article_info[1], self)
         article.on_disk = self.assembled
         self.articles[article] = article
         self.decodetable.append(article)
@@ -385,18 +370,11 @@ class NzbFile(TryList):
         self.file_lock = threading.RLock()
         self.assembler_next_index = 0
         self.writer = None
-        if self.articles is None:
-            self.articles = {}
-        elif isinstance(self.articles, list):
+        if isinstance(self.articles, list):
             # Converted from list to dict
             self.articles = {x: x for x in self.articles}
         for article in self.articles:
             article.lock = self.lock
-        if self.decodetable is None:
-            self.decodetable = []
-        else:
-            for article in self.decodetable:
-                article.lock = self.lock
         super().__setstate__(dict_.get("try_list", []))
 
     def __lt__(self, other: "NzbFile"):
