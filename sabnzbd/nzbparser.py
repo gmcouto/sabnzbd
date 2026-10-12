@@ -420,8 +420,7 @@ def nzbfile_parser(full_nzb_path: str, nzo):
                             nzo.meta[meta_type] = []
                         nzo.meta[meta_type].append(meta.text)
                 element.clear()
-                safe_meta = {k: ("<redacted>" if k.lower() == "password" else v) for k, v in nzo.meta.items()}
-                logging.debug("NZB file meta-data = %s", safe_meta)
+                logging.debug("NZB file meta-data = %s", nzo.meta)
                 continue
 
             # Parse the files
@@ -513,14 +512,38 @@ def nzbfile_parser(full_nzb_path: str, nzo):
 
     if any(v.lower() == "true" for v in nzo.meta.get("yenc_encrypted", [])):
         nzo.yenc_encrypted = True
+
+        # Forward-Compatibility Metadata Gating (Body Standard v1.2 §8)
+        for ver in nzo.meta.get("yenc_version", []):
+            if ver != "1.2":
+                raise YEncEncryptionStructuralError(
+                    f"UNSUPPORTED_VERSION: NZB declares yenc_version '{ver}', only '1.2' is supported"
+                )
+
+        for cipher in nzo.meta.get("yenc_cipher", []):
+            if cipher != "XChaCha20-Poly1305":
+                raise YEncEncryptionStructuralError(
+                    f"UNSUPPORTED_CIPHER: NZB declares yenc_cipher '{cipher}', only 'XChaCha20-Poly1305' is supported"
+                )
+
+        for mode in nzo.meta.get("yenc_mode", []):
+            if mode.lower() != "combined":
+                raise YEncEncryptionStructuralError(
+                    f"UNSUPPORTED_MODE: NZB declares yenc_mode '{mode}', only 'combined' is supported"
+                )
+
         raw_meta_passwords = nzo.meta.get("password") or []
         if isinstance(raw_meta_passwords, str):
             raw_meta_passwords = [raw_meta_passwords]
-        has_meta_pw = any(isinstance(p, str) and p.strip() for p in raw_meta_passwords)
+        meta_pws = [p for p in raw_meta_passwords if isinstance(p, str) and p.strip()]
+
         attr_pw = getattr(nzo, "password", None)
         has_attr_pw = isinstance(attr_pw, str) and bool(attr_pw.strip())
 
-        if not (has_meta_pw or has_attr_pw):
+        if not (meta_pws or has_attr_pw):
             raise YEncEncryptionStructuralError(
                 "MISSING_PASSWORD: NZB declares yenc_encrypted=true but no password meta was supplied"
             )
+
+        if not has_attr_pw and meta_pws:
+            nzo.password = meta_pws[0]

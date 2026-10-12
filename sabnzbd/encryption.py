@@ -17,6 +17,11 @@
 
 """
 sabnzbd.encryption - Decryption adapter encapsulating Argon2id, PyNaCl, and FF1.
+
+The heavy crypto dependencies (argon2-cffi, PyNaCl) are imported lazily so that
+ordinary (unencrypted) downloads and application startup work without them;
+encrypted jobs check availability on first use and fail structurally with an
+actionable diagnostic when a package is missing.
 """
 
 import hashlib
@@ -26,9 +31,39 @@ import struct
 import threading
 from typing import Any, Optional
 
-import argon2.low_level as ll
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-import nacl.bindings as nb
+
+
+# Minimal non-empty dependency diagnostics: raised structurally when an encrypted
+# job needs a package that is not installed (METADATA_VALIDATION tier - the job
+# cannot proceed on any server, so no alternate-provider query is made).
+class MissingDependencyError(ImportError):
+    pass
+
+
+def _lazy_argon2():
+    """Import argon2.low_level lazily; raise a structural diagnostic when absent."""
+    try:
+        import argon2.low_level as ll
+
+        return ll
+    except ImportError as e:
+        raise MissingDependencyError(
+            "yEnc-encrypted download requires the 'argon2-cffi' package (pip install argon2-cffi)"
+        ) from e
+
+
+def _lazy_nacl_bindings():
+    """Import nacl.bindings lazily; raise a structural diagnostic when absent."""
+    try:
+        import nacl.bindings as nb
+
+        return nb
+    except ImportError as e:
+        raise MissingDependencyError(
+            "yEnc-encrypted download requires the 'pynacl' package (pip install pynacl)"
+        ) from e
+
 
 BOOTSTRAP_PREFIX_LEN = 20
 
@@ -54,6 +89,27 @@ class YEncEncryptionCryptoError(ValueError):
     never retried as provider corruption. Inherits from ValueError so existing
     ``isinstance(e, ValueError)`` handlers still catch it.
     """
+
+
+def _split_ending(line: bytes) -> tuple[bytes, bytes]:
+    """Split line content and line ending (b'\r\n', b'\n', or b'')."""
+    if line.endswith(b"\r\n"):
+        return line[:-2], b"\r\n"
+    elif line.endswith(b"\n"):
+        return line[:-1], b"\n"
+    return line, b""
+
+
+def build_aad(
+    name_bytes: bytes,
+    part_number: int,
+    part_begin: int,
+    segment_bytes: int,
+) -> bytes:
+    """Serialize Associated Data (AAD) exactly per Body Encryption Standard v1.2 Section 2.1."""
+    if not name_bytes:
+        raise YEncEncryptionCryptoError("MISSING_AAD_SUBJECT: =ybegin name parameter is required for AAD")
+    return b"yenc-body aad" + struct.pack(">IIQI", part_number, part_begin, segment_bytes, len(name_bytes)) + name_bytes
 
 
 def byte_to_numeral(b: int) -> int:
@@ -295,6 +351,30 @@ def extract_and_remove_yencryption(yenc_block: bytes) -> tuple[dict[str, Any], b
             f"Malformed =yencryption line: {yenc_line.decode('ascii', errors='replace').strip()}"
         )
 
+    # Mandatory name parameter for AAD (Body Standard v1.2 §2.1)
+    name_idx = line1.find(b"name=")
+    if name_idx == -1:
+        raise YEncEncryptionCryptoError("PROVIDER_FAILOVER: missing mandatory name parameter in =ybegin")
+    name_bytes = line1[name_idx + 5 :].rstrip(b"\r\n")
+    if not name_bytes:
+        raise YEncEncryptionCryptoError("PROVIDER_FAILOVER: empty name parameter in =ybegin")
+
+    if is_multipart:
+        ybegin_tokens = {t.split(b"=")[0]: t.split(b"=")[1] for t in line1.split() if b"=" in t}
+        part_number = int(ybegin_tokens.get(b"part", 1))
+        tokens = {t.split(b"=")[0]: t.split(b"=")[1] for t in line2.split() if b"=" in t}
+        part_begin = int(tokens.get(b"begin", 1))
+        part_end = int(tokens.get(b"end", 1))
+        segment_bytes = part_end - part_begin + 1
+    else:
+        tokens = {t.split(b"=")[0]: t.split(b"=")[1] for t in line1.split() if b"=" in t}
+        part_number = 1
+        part_begin = 1
+        segment_bytes = int(tokens.get(b"size", 0))
+
+    params["aad"] = build_aad(name_bytes, part_number, part_begin, segment_bytes)
+    params["segment_bytes"] = segment_bytes
+
     clean_lines = raw_lines[:yenc_idx] + raw_lines[yenc_idx + 1 :]
     return params, b"".join(clean_lines)
 
@@ -302,12 +382,10 @@ def extract_and_remove_yencryption(yenc_block: bytes) -> tuple[dict[str, Any], b
 def extract_bootstrap_from_line1(line1: bytes) -> tuple[bytes, int]:
     """Extract and validate 20-byte bootstrap prefix ([16B salt][4B uint32_be(segmentIndex)]) from Line 1.
 
-    Ensures line is at least 22 bytes, at most 4096 bytes, salt contains no forbidden bytes, and segment_index > 0.
+    Ensures line is at least 22 bytes, salt contains no forbidden bytes, and segment_index > 0.
     """
     if len(line1) < 22:
         raise YEncEncryptionCryptoError(f"Line 1 truncated: {len(line1)} bytes (minimum 22)")
-    if len(line1) > 4096:
-        raise YEncEncryptionCryptoError(f"Line 1 too long: {len(line1)} bytes (maximum 4096)")
     salt = line1[:16]
     for b in salt:
         if b in (0x00, 0x0A, 0x0D):
@@ -329,6 +407,8 @@ def split_lines_preserving_endings(input_bytes: bytes) -> list[bytes]:
     uint32_be(segmentIndex) may contain 0x0A (LF) or 0x0D (CR), the Line 1 terminator
     is searched strictly after the 20-byte bootstrap prefix.
     """
+    if not input_bytes:
+        raise YEncEncryptionCryptoError("Empty encrypted article block")
     lines: list[bytes] = []
     pos = 0
     total = len(input_bytes)
@@ -338,11 +418,9 @@ def split_lines_preserving_endings(input_bytes: bytes) -> list[bytes]:
             if total >= BOOTSTRAP_PREFIX_LEN:
                 pos += BOOTSTRAP_PREFIX_LEN
             else:
-                # Match Rust (control.rs split_lines_preserving_endings)
-                # — input too short to carry the 20-byte bootstrap prefix is
+                # Input too short to carry the 20-byte bootstrap prefix is
                 # treated as one truncated Line 1 so a stray 0x0A inside the
-                # (missing) prefix cannot fragment it; both clients then report
-                # the same LINE_TRUNCATED-style failure for identical bytes.
+                # (missing) prefix cannot fragment it.
                 pos = total
         idx = input_bytes.find(b"\n", pos)
         if idx != -1:
@@ -374,7 +452,7 @@ class DecryptionAdapter:
         type: Any,
         version: int,
     ) -> bytes:
-        return ll.hash_secret_raw(
+        return _lazy_argon2().hash_secret_raw(
             secret=secret,
             salt=salt,
             time_cost=time_cost,
@@ -390,11 +468,8 @@ class DecryptionAdapter:
         with self._lock:
             if salt in self._key_cache:
                 return self._key_cache[salt]
-        if not self.password:
-            raise YEncEncryptionStructuralError("MISSING_PASSWORD: no password supplied for yEnc-encrypted article")
-        with self._lock:
-            if salt in self._key_cache:
-                return self._key_cache[salt]
+            if not self.password:
+                raise YEncEncryptionStructuralError("MISSING_PASSWORD: no password supplied for yEnc-encrypted article")
             key = self._derive_argon2id(
                 secret=self.password.encode("utf-8"),
                 salt=salt,
@@ -402,7 +477,7 @@ class DecryptionAdapter:
                 memory_cost=65536,  # 64 MiB
                 parallelism=4,
                 hash_len=32,
-                type=ll.Type.ID,
+                type=_lazy_argon2().Type.ID,
                 version=0x13,
             )
             self._key_cache[salt] = key
@@ -410,39 +485,51 @@ class DecryptionAdapter:
 
     def derive_body_nonce(self, key: bytes, segment_index: int) -> bytes:
         """Derive 24-byte nonce for XChaCha20-Poly1305 via 19-byte HMAC-SHA256 layout."""
-        if not (0 <= segment_index <= 0xFFFFFFFF):
-            raise YEncEncryptionCryptoError(f"segment_index {segment_index} out of range for uint32_be")
         msg = b"yenc-body nonce" + struct.pack(">I", segment_index)
         return hmac.new(key, msg, hashlib.sha256).digest()[:24]
 
     def derive_control_keys(self, master_key: bytes, segment_index: int, line_index: int) -> tuple[bytes, bytes]:
         """Derive 32-byte encKey and 8-byte tweak for FF1 control line encryption."""
-        if not (0 <= segment_index <= 0xFFFFFFFF):
-            raise YEncEncryptionCryptoError(f"segment_index {segment_index} out of range for uint32_be")
-        if not (0 <= line_index <= 0xFFFFFFFF):
-            raise YEncEncryptionCryptoError(f"line_index {line_index} out of range for uint32_be")
         enc_key = hmac.new(master_key, b"yenc-control key", hashlib.sha256).digest()
         tweak_msg = b"yenc-control tweak" + struct.pack(">I", segment_index) + struct.pack(">I", line_index)
         tweak = hmac.new(master_key, tweak_msg, hashlib.sha256).digest()[:8]
         return enc_key, tweak
 
-    def decrypt_body(self, ciphertext: bytes, tag: bytes, salt: bytes, segment_index: int) -> bytes:
-        """Authenticate and decrypt ciphertext; raises YEncEncryptionCryptoError on auth failure without releasing plaintext."""
+    def decrypt_body(
+        self,
+        ciphertext: bytes,
+        tag: bytes,
+        salt: bytes,
+        segment_index: int,
+        aad: bytes = b"",
+    ) -> bytes:
+        """Authenticate and decrypt ciphertext; raises YEncEncryptionCryptoError on auth failure without releasing plaintext.
+
+        The AAD must be the Section 2.1 serialization (never empty for conforming articles).
+        """
         key = self.get_master_key(salt)
         nonce = self.derive_body_nonce(key, segment_index)
         ct_and_tag = ciphertext + tag
         try:
-            return nb.crypto_aead_xchacha20poly1305_ietf_decrypt(ct_and_tag, None, nonce, key)
+            return _lazy_nacl_bindings().crypto_aead_xchacha20poly1305_ietf_decrypt(ct_and_tag, aad, nonce, key)
+        except MissingDependencyError:
+            raise
         except Exception as e:
             # Zero-output guarantee: release zero bytes
             raise YEncEncryptionCryptoError(f"Poly1305 authentication failed: {e}") from e
 
-    def decrypt_control_line(self, ciphertext: bytes, enc_key: bytes, tweak: bytes, radix: int = 253) -> bytes:
+    def decrypt_control_line(self, ciphertext: bytes, enc_key: bytes, tweak: bytes) -> bytes:
         """Decrypt a single control line with FF1 over Radix 253."""
-        return ff1_decrypt(enc_key, tweak, ciphertext, radix)
+        return ff1_decrypt(enc_key, tweak, ciphertext)
 
     def restore_control_lines(self, yenc_block: bytes) -> tuple[bytes, bytes, int]:
-        """Restore encrypted control lines in a yEnc article block per Standard v1.2.
+        """Restore encrypted control lines in a yEnc article block per Control Lines Standard v1.2 §5.
+
+        Deterministic combined-mode restoration (Control Std v1.2 §5): header positions are
+        inferred from the restored =ybegin line only; data lines pass through untouched
+        byte-for-byte and are never decrypted or inspected; the footer is identified by
+        position (last physical line), never by content search. Line terminators are
+        preserved byte-for-byte (bare LF is never canonicalized to CRLF).
 
         Returns (restored_yenc_block, salt, segment_index).
 
@@ -451,120 +538,78 @@ class DecryptionAdapter:
         lineIndex accounting; they are preserved as-is after the restored footer.
         """
         raw_lines = split_lines_preserving_endings(yenc_block)
-        if not raw_lines:
-            return yenc_block, b"", 0
 
         # Preserve trailing blank lines if present, while finding true footer line
         trailing_lines: list[bytes] = []
         while raw_lines and not raw_lines[-1].strip():
             trailing_lines.insert(0, raw_lines.pop())
 
-        if not raw_lines:
-            return yenc_block, b"", 0
+        # Line 1 (lineIndex=1): bootstrap prefix + FF1-encrypted =ybegin
+        line1_content, line1_ending = _split_ending(raw_lines[0])
+        salt, segment_index = extract_bootstrap_from_line1(line1_content)
 
-        # Extract line ending from line 1
-        line1_raw = raw_lines[0]
-        if line1_raw.endswith(b"\r\n"):
-            ending = b"\r\n"
-            line1_content = line1_raw[:-2]
-        elif line1_raw.endswith(b"\n"):
-            ending = b"\n"
-            line1_content = line1_raw[:-1]
-        else:
-            ending = b""
-            line1_content = line1_raw
-
-        # Line 1: first 20 bytes is bootstrap prefix ([16B salt][4B uint32_be(segmentIndex)])
-        salt, line1_segment_index = extract_bootstrap_from_line1(line1_content)
-
-        ct1 = line1_content[BOOTSTRAP_PREFIX_LEN:]
         master_key = self.get_master_key(salt)
-        enc_key, tweak1 = self.derive_control_keys(master_key, line1_segment_index, 1)
-        pt1 = self.decrypt_control_line(ct1, enc_key, tweak1)
+        enc_key, tweak1 = self.derive_control_keys(master_key, segment_index, 1)
+        pt1 = self.decrypt_control_line(line1_content[BOOTSTRAP_PREFIX_LEN:], enc_key, tweak1)
         if not pt1.startswith(b"=ybegin"):
             raise YEncEncryptionCryptoError("Control line decrypt failure: line 1 does not start with =ybegin")
 
-        is_multipart = any(token.startswith(b"part=") for token in pt1.split())
         if len(raw_lines) < 2:
             raise YEncEncryptionCryptoError(
                 f"Article block too short for encrypted yEnc: {len(raw_lines)} line(s) (minimum 2)"
             )
 
-        max_header_lines = 3 if is_multipart else 2
+        is_multipart = any(token.startswith(b"part=") for token in pt1.split())
+        restored_lines: list[bytes] = [pt1 + line1_ending]
 
-        restored_lines: list[bytes] = [pt1 + ending]
-        n_total = len(raw_lines)
+        if is_multipart:
+            if len(raw_lines) < 3:
+                raise YEncEncryptionCryptoError(
+                    f"Multipart article too short for encrypted yEnc: {len(raw_lines)} line(s) (minimum 3)"
+                )
+            part_content, part_ending = _split_ending(raw_lines[1])
+            enc_key, tweak = self.derive_control_keys(master_key, segment_index, 2)
+            pt2 = self.decrypt_control_line(part_content, enc_key, tweak)
+            if not pt2.startswith(b"=ypart"):
+                raise YEncEncryptionCryptoError("Multipart line 2 does not start with =ypart")
+            restored_lines.append(pt2 + part_ending)
 
-        in_header = True
-        for idx in range(1, n_total - 1):
-            raw_line = raw_lines[idx]
-            if raw_line.endswith(b"\r\n"):
-                line_ending = b"\r\n"
-                content = raw_line[:-2]
-            elif raw_line.endswith(b"\n"):
-                line_ending = b"\n"
-                content = raw_line[:-1]
-            else:
-                line_ending = b""
-                content = raw_line
-
-            line_index = idx + 1
-            if line_index <= max_header_lines and in_header:
-                enc_key, tweak = self.derive_control_keys(master_key, line1_segment_index, line_index)
+            first_data_line_index = 3
+            if len(raw_lines) > 3:
+                enc_content, enc_ending = _split_ending(raw_lines[2])
+                enc_key, tweak = self.derive_control_keys(master_key, segment_index, 3)
                 try:
-                    pt = self.decrypt_control_line(content, enc_key, tweak)
-                except YEncEncryptionCryptoError as e:
-                    # Fail-closed (Control Std v1.2 §5 step 4a): only decryption
-                    # SUCCESS yielding non-=y content terminates the header loop (first
-                    # data line). An FF1 error on an expected header line is retriable
-                    # provider corruption - the raw wire line is never passed through
-                    # as a data line.
-                    raise YEncEncryptionCryptoError(
-                        f"PROVIDER_FAILOVER: control-line decryption failed at line {line_index} in the header region"
-                    ) from e
-
-                if pt and pt.startswith(b"=y"):
-                    if is_multipart and line_index == 2:
-                        if not pt.startswith(b"=ypart"):
-                            raise YEncEncryptionCryptoError("Multipart line 2 does not start with =ypart")
-                    elif not is_multipart and line_index == 2:
-                        if not pt.startswith(b"=yencryption"):
-                            raise YEncEncryptionCryptoError(
-                                f"Header line {line_index} does not start with =yencryption"
-                            )
-                        in_header = False
-                    elif is_multipart and line_index == 3:
-                        if not pt.startswith(b"=yencryption"):
-                            raise YEncEncryptionCryptoError(
-                                f"Header line {line_index} does not start with =yencryption"
-                            )
-                        in_header = False
-                    restored_lines.append(pt + line_ending)
-                else:
-                    in_header = False
-                    restored_lines.append(raw_line)
-            else:
-                restored_lines.append(raw_line)
-
-        # Final line (footer)
-        raw_footer = raw_lines[-1]
-        if raw_footer.endswith(b"\r\n"):
-            footer_ending = b"\r\n"
-            footer_content = raw_footer[:-2]
-        elif raw_footer.endswith(b"\n"):
-            footer_ending = b"\n"
-            footer_content = raw_footer[:-1]
+                    pt_enc = self.decrypt_control_line(enc_content, enc_key, tweak)
+                    if pt_enc.startswith(b"=yencryption"):
+                        restored_lines.append(pt_enc + enc_ending)
+                        first_data_line_index = 4
+                except Exception:
+                    pass
         else:
-            footer_ending = b""
-            footer_content = raw_footer
+            first_data_line_index = 2
+            if len(raw_lines) > 2:
+                enc_content, enc_ending = _split_ending(raw_lines[1])
+                enc_key, tweak = self.derive_control_keys(master_key, segment_index, 2)
+                try:
+                    pt_enc = self.decrypt_control_line(enc_content, enc_key, tweak)
+                    if pt_enc.startswith(b"=yencryption"):
+                        restored_lines.append(pt_enc + enc_ending)
+                        first_data_line_index = 3
+                except Exception:
+                    pass
 
-        footer_line_index = n_total
-        enc_key, tweak = self.derive_control_keys(master_key, line1_segment_index, footer_line_index)
+        # Data lines (D through N-1) pass through untouched, byte for byte, terminators included
+        for idx in range(first_data_line_index - 1, len(raw_lines) - 1):
+            restored_lines.append(raw_lines[idx])
+
+        # Footer at the fixed last position (lineIndex = N); no content-based search
+        footer_content, footer_ending = _split_ending(raw_lines[-1])
+        footer_line_index = len(raw_lines)
+        enc_key, tweak = self.derive_control_keys(master_key, segment_index, footer_line_index)
         pt_footer = self.decrypt_control_line(footer_content, enc_key, tweak)
         if not pt_footer.startswith(b"=yend"):
             raise YEncEncryptionCryptoError("Control line decrypt failure: footer does not start with =yend")
         restored_lines.append(pt_footer + footer_ending)
-        if trailing_lines:
-            restored_lines.extend(trailing_lines)
+        restored_lines.extend(trailing_lines)
 
-        return b"".join(restored_lines), salt, line1_segment_index
+        return b"".join(restored_lines), salt, segment_index

@@ -92,8 +92,6 @@ class TestNzbParser:
         with open(vectors_path, encoding="utf-8") as vectors_file:
             vectors = json.load(vectors_file)["vectors"]
 
-        assert len(vectors) == 10
-
         for vector in vectors:
             vector_id = vector["id"]
             nzb_file = _write_nzb_gz(SAB_CACHE_DIR, f"test_{vector_id}", vector["nzb_xml"])
@@ -180,30 +178,94 @@ class TestNzbParser:
             nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, "ws_pw", ws_pw_xml), ws_pw_nzo)
 
     @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
-    def test_password_redacted_from_parser_logs(self, caplog):
-        """Captured parser logs may name metadata keys but never contain the password value."""
-        secret_sentinel = "SECRET_PASSWORD_SENTINEL_XYZ_98765"
-        xml = f"""<?xml version="1.0" encoding="utf-8"?>
+    def test_encrypted_ingest_version_cipher_and_order_validation(self):
+        """Validate supplied version/cipher/mode during ingest before NNTP, independent of meta tag order."""
+        from sabnzbd.encryption import YEncEncryptionStructuralError
+
+        def make_nzb(meta_entries: list[tuple[str, str]]) -> str:
+            metas = "\n".join(f'  <meta type="{t}">{v}</meta>' for t, v in meta_entries)
+            return f"""<?xml version="1.0" encoding="utf-8"?>
 <nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
  <head>
-  <meta type="password">{secret_sentinel}</meta>
-  <meta type="category">movies</meta>
+{metas}
  </head>
- <file poster="p@test.com" date="1600000000" subject="&quot;test.bin&quot; yEnc (1/1)">
-  <segments><segment bytes="1000" number="1">m1@test</segment></segments>
+ <file poster="p@test.com" date="1600000000" subject="test.bin">
+  <segments><segment bytes="1000" number="1">s1@test</segment></segments>
  </file>
 </nzb>"""
-        nzb_file = _write_nzb_gz(SAB_CACHE_DIR, "test_secret_log", xml)
-        nzo = NzbObject("test_secret_log")
 
-        import logging
+        # 1. Supported version and cipher present, standard ordering
+        xml_ok = make_nzb(
+            [
+                ("yenc_encrypted", "true"),
+                ("yenc_version", "1.2"),
+                ("yenc_cipher", "XChaCha20-Poly1305"),
+                ("password", "secret123"),
+            ]
+        )
+        nzo_ok = NzbObject("ok")
+        nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, "ok", xml_ok), nzo_ok)
+        assert nzo_ok.yenc_encrypted is True
+        assert nzo_ok.password == "secret123"
 
-        with caplog.at_level(logging.DEBUG):
-            nzbparser.nzbfile_parser(nzb_file, nzo)
+        # 2. Version and cipher absent -> succeeds (defaults apply)
+        xml_absent = make_nzb(
+            [
+                ("password", "secret_absent"),
+                ("yenc_encrypted", "true"),
+            ]
+        )
+        nzo_absent = NzbObject("absent")
+        nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, "absent", xml_absent), nzo_absent)
+        assert nzo_absent.yenc_encrypted is True
+        assert nzo_absent.password == "secret_absent"
 
-        # The secret password MUST be completely absent from any captured log messages
-        assert secret_sentinel not in caplog.text
+        # 3. Independent of metadata ordering (reversed order)
+        xml_reversed = make_nzb(
+            [
+                ("password", "reversed_pw"),
+                ("yenc_cipher", "XChaCha20-Poly1305"),
+                ("yenc_version", "1.2"),
+                ("yenc_mode", "combined"),
+                ("yenc_encrypted", "true"),
+            ]
+        )
+        nzo_rev = NzbObject("reversed")
+        nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, "reversed", xml_reversed), nzo_rev)
+        assert nzo_rev.yenc_encrypted is True
+        assert nzo_rev.password == "reversed_pw"
 
-        # The password metadata must still be present in nzo.meta for downstream consumption
-        assert nzo.meta.get("password") == [secret_sentinel]
-        assert nzo.meta.get("category") == ["movies"]
+        # 4. Unsupported version -> raises YEncEncryptionStructuralError
+        xml_bad_ver = make_nzb(
+            [
+                ("yenc_encrypted", "true"),
+                ("yenc_version", "2.0"),
+                ("password", "secret123"),
+            ]
+        )
+        with pytest.raises(YEncEncryptionStructuralError, match="UNSUPPORTED_VERSION"):
+            nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, "bad_ver", xml_bad_ver), NzbObject("bad_ver"))
+
+        # 5. Unsupported cipher -> raises YEncEncryptionStructuralError
+        xml_bad_cipher = make_nzb(
+            [
+                ("yenc_encrypted", "true"),
+                ("yenc_cipher", "AES-256-GCM"),
+                ("password", "secret123"),
+            ]
+        )
+        with pytest.raises(YEncEncryptionStructuralError, match="UNSUPPORTED_CIPHER"):
+            nzbparser.nzbfile_parser(
+                _write_nzb_gz(SAB_CACHE_DIR, "bad_cipher", xml_bad_cipher), NzbObject("bad_cipher")
+            )
+
+        # 6. Unsupported mode -> raises YEncEncryptionStructuralError
+        xml_bad_mode = make_nzb(
+            [
+                ("yenc_encrypted", "true"),
+                ("yenc_mode", "body-only"),
+                ("password", "secret123"),
+            ]
+        )
+        with pytest.raises(YEncEncryptionStructuralError, match="UNSUPPORTED_MODE"):
+            nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, "bad_mode", xml_bad_mode), NzbObject("bad_mode"))

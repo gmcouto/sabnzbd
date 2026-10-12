@@ -19,15 +19,25 @@
 sabnzbd.decoder - article decoder
 """
 
+import io
 import logging
 import hashlib
 from typing import Optional
 
+import sabctools
 import sabnzbd
 from sabnzbd.constants import SABCTOOLS_VERSION_REQUIRED
 from sabnzbd.nzb import Article
 from sabnzbd.misc import match_str
-from sabnzbd.encryption import YEncEncryptionCryptoError, YEncEncryptionStructuralError
+from sabnzbd.encryption import (
+    DecryptionAdapter,
+    YEncEncryptionCryptoError,
+    YEncEncryptionStructuralError,
+    extract_and_remove_yencryption,
+    extract_bootstrap_from_line1,
+    ff1_decrypt,
+    BOOTSTRAP_PREFIX_LEN,
+)
 
 # Check for correct SABCTools version
 SABCTOOLS_VERSION = None
@@ -72,16 +82,16 @@ class SinkFailed(Exception):
 
 def _is_yenc_encrypted(article: Article) -> bool:
     """Whether the article belongs to a yEnc-encrypted release (not merely password-protected)."""
-    return bool(getattr(getattr(getattr(article, "nzf", None), "nzo", None), "yenc_encrypted", False))
+    try:
+        return bool(article.nzf.nzo.yenc_encrypted)
+    except AttributeError:
+        return False
 
 
-def _get_decryption_adapter(article: Article, password: Optional[str]):
+def _get_decryption_adapter(article: Article, password: Optional[str]) -> DecryptionAdapter:
     """Retrieve cached DecryptionAdapter from the parent Nzo or create a new one."""
-    from sabnzbd.encryption import DecryptionAdapter
-
-    nzf = getattr(article, "nzf", None)
-    nzo = getattr(nzf, "nzo", None)
-    if nzo is not None:
+    try:
+        nzo = article.nzf.nzo
         with nzo.lock:
             adapter = getattr(nzo, "_decryption_adapter", None)
             if adapter is not None and adapter.password == password:
@@ -89,7 +99,8 @@ def _get_decryption_adapter(article: Article, password: Optional[str]):
             adapter = DecryptionAdapter(password=password)
             nzo._decryption_adapter = adapter
             return adapter
-    return DecryptionAdapter(password=password)
+    except AttributeError:
+        return DecryptionAdapter(password=password)
 
 
 def decode(article: Article, decoder: sabctools.NNTPResponse):
@@ -107,7 +118,19 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
         if sabnzbd.LOG_ALL:
             logging.debug("Decoding %s", art_id)
 
-        if decoder.format is sabctools.EncodingFormat.UU:
+        # Guard encrypted jobs before response-format dispatch:
+        # Unencrypted plaintext substitutions (UU or unencrypted yEnc) must be rejected
+        # before format-specific decoders, salvage paths, or cache commit. A real
+        # sabctools NNTPResponse always has an int bytes_decoded.
+        if _is_yenc_encrypted(article):
+            if decoder.format is sabctools.EncodingFormat.UU or (
+                isinstance(decoder.bytes_decoded, int) and decoder.bytes_decoded
+            ):
+                raise YEncEncryptionCryptoError(
+                    f"UNAUTHENTICATED_ARTICLE: unencrypted article {art_id} in a yEnc-encrypted release"
+                )
+            decoded_data = decode_yenc(article, decoder)
+        elif decoder.format is sabctools.EncodingFormat.UU:
             decoded_data = decode_uu(article, decoder)
         else:
             decoded_data = decode_yenc(article, decoder)
@@ -125,6 +148,12 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
         return
 
     except BadData as error:
+        # Zero-output guarantee: encrypted articles must never salvage corrupt data
+        if _is_yenc_encrypted(article):
+            logging.info("Corrupt data in encrypted article %s, trying next server", art_id)
+            search_new_server(article)
+            return
+
         # Continue to the next one if we found new server
         if search_new_server(article):
             return
@@ -133,6 +162,8 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
         decoded_data = error.data
 
     except BadUu:
+        # UU articles in an encrypted release were rejected before dispatch, so this
+        # BadUu always belongs to an unencrypted article.
         logging.info("Badly formed uu article in %s", art_id)
 
         # Try the next server
@@ -149,14 +180,10 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
         decoded_data = None
 
     except YEncEncryptionCryptoError:
-        # Crypto/structural wire failure on encrypted articles (authentication failure,
-        # FF1 control-line decrypt failure, corrupt bootstrap): log without secrets and
-        # query next server (retryable provider corruption). Unencrypted articles that
-        # raise this class stay eligible for search_new_server too.
-        if _is_yenc_encrypted(article):
-            logging.info("Authentication failed for %s, trying next server", art_id)
-        else:
-            logging.info("Badly formed article %s", art_id)
+        # Crypto wire failure on encrypted articles (authentication failure, FF1
+        # control-line decrypt failure, corrupt bootstrap): log without secrets and
+        # query next server (retryable provider corruption).
+        logging.info("Authentication failed for %s, trying next server", art_id)
 
         # Continue to the next one if we found new server
         if search_new_server(article):
@@ -234,10 +261,10 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
         # Causing the decoder-queue to fill up and delay the downloader
         sabnzbd.ArticleCache.save_article(article, decoded_data)
         article.decoded = True
-    elif decoded_data is not None and _is_yenc_encrypted(article):
-        # Authenticated empty segment: complete, nothing cached or assembled. Marked
-        # decoded (not on_disk) so the assembler advances without stalling on
-        # unwritten data.
+    elif decoded_data is not None:
+        # Authenticated empty segment on an encrypted release: complete, nothing cached
+        # or assembled. Marked decoded (not on_disk) so the assembler advances without
+        # stalling on unwritten data. Unencrypted empty articles only occur on precheck.
         article.decoded = True
     elif not nzo.precheck and (article_success or not _is_yenc_encrypted(article)):
         # Either there was nothing to save, or the decoder streamed it straight to the
@@ -269,15 +296,37 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
 
     nzf = article.nzf
 
-    password = getattr(article.nzf.nzo, "password", None)
-
     # Encrypted wire response: sabctools couldn't decode because control lines were FF1-encrypted
     if response.bytes_decoded == 0 and getattr(response, "lines", None) and _is_yenc_encrypted(article):
-        import io
-        import sabctools
-        from sabnzbd.encryption import extract_and_remove_yencryption
-
         lines = [line.encode("latin-1") if isinstance(line, str) else line for line in response.lines]
+
+        # Transport seam (RFC 3977 §3.1.1): a native ARTICLE response (status 220)
+        # includes NNTP article headers before the yEnc body; BODY (222) does not.
+        # Scan for Line 1 of the encrypted body so bootstrap extraction starts at the actual
+        # article body, regardless of which command fetched this article.
+        password = getattr(article.nzf.nzo, "password", None)
+        adapter = _get_decryption_adapter(article, password=password)
+
+        if response.status_code == 220:
+            body_start = None
+            for idx, line in enumerate(lines):
+                cand = line[1:] if line.startswith(b"..") else line
+                if len(cand) >= 22:
+                    try:
+                        s, seg_idx_val = extract_bootstrap_from_line1(cand)
+                        key = adapter.get_master_key(s)
+                        ek_val, tw_val = adapter.derive_control_keys(key, seg_idx_val, 1)
+                        pt_dec = ff1_decrypt(ek_val, tw_val, cand[BOOTSTRAP_PREFIX_LEN:])
+                        if pt_dec.startswith(b"=ybegin"):
+                            body_start = idx
+                            break
+                    except Exception:
+                        pass
+            if body_start is None:
+                raise YEncEncryptionCryptoError(
+                    f"No encrypted body found in ARTICLE response {getattr(article, 'article', '')}"
+                )
+            lines = lines[body_start:]
 
         # Dot-unstuffing adapter (RFC 3977 §3.1.1 transport boundary). On the encrypted
         # path sabctools cannot recognize yEnc (the =ybegin line is FF1-encrypted), so
@@ -288,9 +337,10 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
         # single '.' is the article terminator (already consumed by sabctools here).
         lines = [line[1:] if line.startswith(b"..") else line for line in lines]
 
-        raw_wire = b"\r\n".join(lines) + b"\r\n"
+        # Preserve original line endings: use bare LF if article was received with LF
+        wire_ending = b"\n" if getattr(article, "_bare_lf", False) else b"\r\n"
+        raw_wire = wire_ending.join(lines) + wire_ending
 
-        adapter = _get_decryption_adapter(article, password=password)
         restored_block, salt_line1, seg_idx_line1 = adapter.restore_control_lines(raw_wire)
         yenc_params, clean_yenc = extract_and_remove_yencryption(restored_block)
 
@@ -304,12 +354,10 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
                 f"Dual index mismatch between control line 1 ({seg_idx_line1}) and =yencryption ({yenc_params['segment_index']})"
             )
 
-        art_id = getattr(article, "article", "enc")
-        if isinstance(art_id, str):
-            art_bytes = art_id.replace("\r", "").replace("\n", "").encode("ascii", "replace")
-        else:
-            art_bytes = b"enc"
-        clean_wire = b"222 0 <" + art_bytes + b">\r\n" + clean_yenc
+        # Constant synthetic response status; the sub-decoder never reads the Message-ID.
+        # sabctools requires CRLF framing for its internal parsing state machine.
+        clean_yenc_crlf = clean_yenc.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+        clean_wire = b"222 0 <x>\r\n" + clean_yenc_crlf
         if not clean_wire.endswith(b"\r\n"):
             clean_wire += b"\r\n"
         clean_wire += b".\r\n"
@@ -331,6 +379,7 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
             tag=yenc_params["tag"],
             salt=yenc_params["salt"],
             segment_index=seg_idx_line1,
+            aad=yenc_params["aad"],
         )
 
         decoded_data = bytearray(plaintext)

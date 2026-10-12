@@ -8,7 +8,10 @@
     "time_cost": 1,
     "memory_cost_kib": 65536,
     "parallelism": 4,
-    "output_length_bytes": 32
+    "output_length_bytes": 32,
+    "password_encoding": "UTF-8 with no Unicode normalization (no NFC/NFD/NFKC/NFKD)",
+    "optional_secret": "empty (zero-length)",
+    "optional_associated_data": "empty (zero-length)"
   },
   "vectors": [
     {
@@ -52,6 +55,32 @@
       "password": "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2W3x4Y5z6A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2W3x4Y5z6A1b2C3d4E5f6G7h8I9j0K1l2M3n4",
       "salt_hex": "102030405060708090a0b0c0d0e0f000",
       "expected_key_hex": "1743d4b5614edb4e0aac20e9a74474fd3d2fe84f20cc4093369b9fe2a1546b7a"
+    },
+    {
+      "id": "argon2id-07-no-normalization-nfkc-triplet",
+      "description": "Three NFC-equivalent spellings (U+212B, U+00C5, A+U+030A) derive three different keys: normalization is not applied",
+      "password": "Ångström",
+      "salt_hex": "0badcafe0badcafe0badcafe0badcafe",
+      "expected_key_hex": "ea03029f984333fb2635573e0bbb0c61cfbb9dfe8d23776693cc636a210024fb",
+      "no_normalization_distinct_passwords": [
+        "Ångström",
+        "Ångström",
+        "Ångström"
+      ]
+    },
+    {
+      "id": "argon2id-08-cjk-utf8",
+      "description": "CJK password requiring 3-byte UTF-8 sequences",
+      "password": "パスワード漢字",
+      "salt_hex": "00112233445566778899aabbccddeeff",
+      "expected_key_hex": "28f814895d69e13fd6000ba126b7e8d2cc0b31229d7f0540166b5eea572437dc"
+    },
+    {
+      "id": "argon2id-09-xml-specials",
+      "description": "Password with XML-special characters (<, >, &, quotes) that must survive XML round-trip unchanged",
+      "password": "<a>&\"'=\"</b>",
+      "salt_hex": "5152535455565758595a5b5c5d5e5f60",
+      "expected_key_hex": "016f3cc8ee6d2b2dc5f922c0ac8e659d48382eb15caf1d3678e4b3927a24d18b"
     }
   ]
 }

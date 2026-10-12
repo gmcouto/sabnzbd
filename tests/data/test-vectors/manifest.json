@@ -1,12 +1,12 @@
 {
   "schema_version": "1.0",
   "standard_version": "1.2",
-  "generated_at": "2026-10-10T00:00:00Z",
+  "generated_at": "2026-10-11T00:00:00Z",
   "description": "Deterministic test vectors for yEnc Body & Control Lines Encryption Standards v1.2",
   "files": {
     "argon2id.json": {
-      "sha256": "20ae3ff6f16045cb283787b8d55ed1dc574fa583f8f138a2ed47261789cd1335",
-      "vector_count": 6,
+      "sha256": "fba974e44785c6ca8153900a2b66d1b3469e6469b3860444fadf9f52272e7309",
+      "vector_count": 9,
       "description": "RFC 9106 Argon2id key derivation test vectors (VEC-01)",
       "requirement": "VEC-01"
     },
@@ -17,26 +17,26 @@
       "requirement": "VEC-02"
     },
     "body_encryption.json": {
-      "sha256": "f66de16703fa2926b2a249741c4ca6685bffe79614518d565949e06051a1ea23",
-      "vector_count": 8,
+      "sha256": "94b91c48d7780a1f64fdd4f7789990f32fc97254fc9494b43ada1af6f9efa1a6",
+      "vector_count": 9,
       "description": "RFC 8439 Extended XChaCha20-Poly1305 body encryption round-trip vectors (VEC-03)",
       "requirement": "VEC-03"
     },
     "control_line_encryption.json": {
-      "sha256": "8bc8413161fb090cfd47f773e4aa02b2c4d8a35d7e4c18b14a21471a288b3588",
-      "vector_count": 8,
+      "sha256": "5ade7d6e763e01cf5375d8e0554b0e402f0264f9c30089fae598579eb9d2a746",
+      "vector_count": 11,
       "description": "NIST SP 800-38G FF1 control-line encryption round-trip vectors (VEC-04)",
       "requirement": "VEC-04"
     },
     "malformed_inputs.json": {
-      "sha256": "298e11d612bf2485001dc55a0cacd1f2df6c4499ef666fe32083c90770ec7de7",
-      "vector_count": 46,
+      "sha256": "c58d0458be274f6b7a1ae9d68dba8f51bcc2de8c9229b9f119baa21854bb0761",
+      "vector_count": 51,
       "description": "Malformed syntax, invalid parameters, and auth failure rejection vectors (VEC-05)",
       "requirement": "VEC-05"
     },
     "nzb_segment_identity.json": {
-      "sha256": "555b5cd6c497899203afe6ac8166056e787354e28982dbc013ffb1a21598c4ff",
-      "vector_count": 10,
+      "sha256": "c6f2106e822fdd8f3dcedce1b505e88fb69c5f6d255a613e9b552ac5d811b2b2",
+      "vector_count": 16,
       "description": "NZB 1.1 parsing, self-describing article identity, and compatibility vectors (VEC-06)",
       "requirement": "VEC-06"
     },

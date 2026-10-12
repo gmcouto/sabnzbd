@@ -50,26 +50,11 @@ Our many other command line options are explained in depth [here](https://sabnzb
 
 ## yEnc Header and Body Decryption
 
-SABnzbd supports downloading releases protected by yEnc body and control-line encryption
-(XChaCha20-Poly1305 and Radix 253 FF1) conforming to the experimental v1.2 yEnc Body
-Encryption and yEnc Control Lines Encryption Standards.
-
-- **Self-Describing Article Wire Bootstrap**: Downloader extracts the 16-byte raw salt and uint32_be
-  `segmentIndex` from the 20-byte Line 1 prefix (`[16B salt][4B uint32_be(segmentIndex)]`) and verifies
-  dual-bootstrap cross-header agreement against the canonical 5-token `=yencryption` header line.
-- **Standard NZB 1.1 Support**: Encrypted NZBs conform strictly to standard NZB 1.1 XML containing
-  only `<meta type="yenc_encrypted">true</meta>` and `<meta type="password">` in `<head>`, without
-  custom segment attributes.
-- **Automatic Decryption**: Encrypted releases containing `<meta type="yenc_encrypted">true</meta>` and
-  embedded password metadata decrypt automatically without manual interaction.
-- **Manual Password Entry**: For encrypted releases without embedded password metadata, the password
-  must be supplied at submission time via Web UI upload or API (`addfile` / `addurl` with `password`
-  parameter). Encrypted releases without a password fail structural validation at ingest time and are
-  not admitted to the queue.
-- **Security & Integrity**: Direct-write streaming is gated for encrypted releases to prevent
-  unauthenticated ciphertext from reaching disk. Poly1305 authentication failure or wire header
-  mismatches trigger Usenet multi-server failover before failing the article. Zero unauthenticated
-  plaintext is released.
+SABnzbd can download releases protected by the experimental yEnc body and control-line
+encryption (XChaCha20-Poly1305 with FF1), conforming to the v1.2 draft standards. Encrypted
+NZBs carry `<meta type="yenc_encrypted">true</meta>` and a transport password; downloads
+authenticate each segment before any bytes reach disk and fail over to other servers on
+corruption. This is an experimental wire contract, not a published standard.
 
 ## About Our Repo
 
