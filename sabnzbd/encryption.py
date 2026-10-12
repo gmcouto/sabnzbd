@@ -278,9 +278,7 @@ def parse_yencryption_line(line: str | bytes) -> Optional[dict[str, Any]]:
 
     idx_bytes = struct.pack(">I", segment_index)
     if b"\x0a" in idx_bytes or b"\x0d" in idx_bytes:
-        raise YEncEncryptionCryptoError(
-            f"FORBIDDEN_SEGMENT_INDEX_BYTE: segment index {segment_index} contains 0x0A or 0x0D"
-        )
+        raise YEncEncryptionCryptoError("FORBIDDEN_SEGMENT_INDEX_BYTE: segment index contains 0x0A or 0x0D")
 
     try:
         salt = bytes.fromhex(salt_hex)
@@ -390,9 +388,8 @@ def extract_and_remove_yencryption(yenc_block: bytes) -> tuple[dict[str, Any], b
     yenc_line = raw_lines[yenc_idx]
     params = parse_yencryption_line(yenc_line)
     if not params:
-        raise YEncEncryptionCryptoError(
-            f"Malformed =yencryption line: {yenc_line.decode('ascii', errors='replace').strip()}"
-        )
+        # The line holds the salt, index and tag; do not echo it into logs
+        raise YEncEncryptionCryptoError("Malformed =yencryption line")
 
     # Mandatory name parameter for AAD (Body Standard v1.2 §2.1)
     if name_bytes is None:

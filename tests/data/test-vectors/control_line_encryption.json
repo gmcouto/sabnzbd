@@ -102,7 +102,7 @@
       "expected_wire_hex": "c25ab5a44cfa8440112fdbd42192355eea94ec91036f6c9a401b5a937497017a507aec5be707635e"
     },
     {
-      "id": "control-vec-07-full-article-4-lines",
+      "id": "control-vec-07-full-article-5-lines",
       "description": "Full single-part combined-mode article: =ybegin, =yencryption header (line 2), two data lines untouched, =yend (line 5); line 1 bootstrap expansion",
       "password": "test123",
       "salt_hex": "4b376d5839704c32715238764e34775a",
@@ -144,7 +144,7 @@
       ]
     },
     {
-      "id": "control-vec-10-exact-wrap-data-lines",
+      "id": "control-vec-10-exact-wrap-article-6-lines",
       "description": "STD-2 exact-wrap fixture: data lines exactly one yEnc wrap long pass through untouched, after a valid =yencryption header at line 2",
       "password": "test123",
       "salt_hex": "4b376d5839704c32715238764e34775a",

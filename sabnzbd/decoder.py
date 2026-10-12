@@ -177,11 +177,11 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
         article_success = False
         decoded_data = None
 
-    except YEncEncryptionCryptoError:
+    except YEncEncryptionCryptoError as error:
         # Crypto wire failure on encrypted articles (authentication failure, FF1
-        # control-line decrypt failure, corrupt bootstrap): log without secrets and
-        # query next server (retryable provider corruption).
-        logging.info("Authentication failed for %s, trying next server", art_id)
+        # control-line decrypt failure, corrupt bootstrap, non-BODY status): log the
+        # reason without secrets and query next server (retryable provider corruption).
+        logging.info("Encrypted article %s rejected (%s), trying next server", art_id, error)
 
         # Continue to the next one if we found new server
         if search_new_server(article):
@@ -328,13 +328,17 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
         yenc_params, clean_yenc = extract_and_remove_yencryption(restored_block)
 
         if yenc_params["salt"] != salt_line1:
-            raise YEncEncryptionCryptoError(
-                f"Salt mismatch between control line 1 ({salt_line1.hex()}) and =yencryption ({yenc_params['salt'].hex()})"
+            # Salt is debug-only; the INFO line for this failure must not carry it
+            logging.debug(
+                "Salt mismatch: control line 1 %s, =yencryption %s",
+                salt_line1.hex(),
+                yenc_params["salt"].hex(),
             )
+            raise YEncEncryptionCryptoError("Salt mismatch between control line 1 and =yencryption")
 
         if yenc_params["segment_index"] != seg_idx_line1:
             raise YEncEncryptionCryptoError(
-                f"Dual index mismatch between control line 1 ({seg_idx_line1}) and =yencryption ({yenc_params['segment_index']})"
+                "Dual index mismatch between control line 1 and =yencryption: segment index differs"
             )
 
         # Constant synthetic response status; the sub-decoder never reads the Message-ID.

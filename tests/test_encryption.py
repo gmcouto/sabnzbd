@@ -1204,7 +1204,8 @@ class TestDirectWriteGatingAndFailover:
             assert nonce.hex() not in log_text, "Nonce must not appear in logs"
             assert tag.hex() not in log_text, "Tag must not appear in logs"
             assert plaintext.decode("ascii") not in log_text, "Plaintext must not appear in logs"
-            assert "Authentication failed for art@e2e, trying next server" in log_text
+            assert "Encrypted article art@e2e rejected (Poly1305 authentication failed: " in log_text
+            assert "Authentication failed" not in log_text
 
         finally:
             srv1.stop()
@@ -1314,6 +1315,86 @@ class TestDirectWriteGatingAndFailover:
 
         finally:
             srv.stop()
+
+    def test_non_body_status_logs_real_reason_not_authentication(self, caplog):
+        """A 430 answer on an encrypted article logs the real reason; it is not an authentication failure."""
+        import logging
+        import sabctools
+        import sabnzbd.decoder as decoder
+
+        article = mock.MagicMock(spec=Article)
+        article.article = "missing@f1"
+        article.nzf.nzo.yenc_encrypted = True
+        article.nzf.nzo.precheck = False
+        article.nzf.nzo.password = "f1-430-pw"
+        article.search_new_server.return_value = True
+
+        response = mock.MagicMock(spec=sabctools.NNTPResponse)
+        response.status_code = 430
+        response.format = sabctools.EncodingFormat.YENC
+        response.bytes_decoded = 0
+        response.lines = None
+        response.sink_failed = False
+
+        caplog.set_level(logging.INFO)
+        decoder.decode(article, response)
+
+        assert "answered with status 430" in caplog.text
+        assert "Authentication failed" not in caplog.text
+        assert article.search_new_server.called
+
+    def test_salt_mismatch_logs_reason_without_salt_hex_at_info(self, caplog):
+        """A salt mismatch logs the reason at INFO, with no salt bytes."""
+        import logging
+        import sabctools
+        import sabnzbd.decoder as decoder
+
+        salt_line1 = bytes.fromhex("1a2b3c4d5e6f7890abcdef1234567890")
+        salt_yenc = bytes.fromhex("ffeeddccbbaa99887766554433221100")
+        yenc_line = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt_yenc.hex()} index=00000001 tag={'ab' * 16}"
+        assert len(yenc_line) == 128
+        block = b"=ybegin line=128 size=3 name=salt.bin\r\n" + yenc_line.encode("ascii") + b"\r\n=yend size=3\r\n"
+
+        article = mock.MagicMock(spec=Article)
+        article.article = "salt@f1"
+        article.nzf.nzo.yenc_encrypted = True
+        article.nzf.nzo.precheck = False
+        article.nzf.nzo.password = "f1-salt-pw"
+        article.search_new_server.return_value = True
+
+        response = mock.MagicMock(spec=sabctools.NNTPResponse)
+        response.status_code = 222
+        response.format = sabctools.EncodingFormat.YENC
+        response.bytes_decoded = 0
+        response.lines = ["=ybegin line=128 size=3 name=salt.bin"]
+        response.sink_failed = False
+
+        caplog.set_level(logging.INFO)
+        with mock.patch.object(
+            DecryptionAdapter, "restore_control_lines", autospec=True, return_value=(block, salt_line1, 1)
+        ):
+            decoder.decode(article, response)
+
+        assert (
+            "Encrypted article salt@f1 rejected (Salt mismatch between control line 1 and =yencryption), "
+            "trying next server"
+        ) in caplog.text
+        assert salt_line1.hex() not in caplog.text
+        assert salt_yenc.hex() not in caplog.text
+        assert article.search_new_server.called
+
+    def test_malformed_yencryption_error_carries_no_salt_or_tag(self):
+        """A malformed =yencryption line is reported without echoing its salt or tag."""
+        salt = "1a2b3c4d5e6f7890abcdef1234567890"
+        tag = "ab" * 16
+        bad_line = f"=yencryption cipher=XChaCha20-Poly1305 salt={salt} index=00000001"
+        block = b"=ybegin line=128 size=3 name=bad.bin\r\n" + bad_line.encode("ascii") + b"\r\n=yend size=3\r\n"
+        assert tag not in bad_line
+
+        with pytest.raises(YEncEncryptionCryptoError, match="Malformed =yencryption") as info:
+            extract_and_remove_yencryption(block)
+        assert salt not in str(info.value)
+        assert "index=" not in str(info.value)
 
     def test_bare_lf_response_over_real_socket(self):
         """A real NNTP server sending bare-LF framed encrypted responses decodes to the
