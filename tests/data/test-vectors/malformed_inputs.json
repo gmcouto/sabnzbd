@@ -281,7 +281,7 @@
     {
       "id": "auth-failure-08-mutated-segment-bytes",
       "category": "auth_failure",
-      "description": "AAD segment byte count mutated (NZB bytes attribute disagrees with geometry) must fail authentication and zero output",
+      "description": "AAD segment byte count mutated (restored geometry differs from the encrypted one) must fail authentication and zero output",
       "password": "test123",
       "salt_hex": "1a2b3c4d5e6f7890abcdef1234567890",
       "segment_index": 1,

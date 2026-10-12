@@ -23,13 +23,13 @@
       "requirement": "VEC-03"
     },
     "control_line_encryption.json": {
-      "sha256": "5ade7d6e763e01cf5375d8e0554b0e402f0264f9c30089fae598579eb9d2a746",
-      "vector_count": 11,
+      "sha256": "56916b3565a7edafc7742b7d1190a5455f9648b5483b272942fba47cccdfadc9",
+      "vector_count": 12,
       "description": "NIST SP 800-38G FF1 control-line encryption round-trip vectors (VEC-04)",
       "requirement": "VEC-04"
     },
     "malformed_inputs.json": {
-      "sha256": "c58d0458be274f6b7a1ae9d68dba8f51bcc2de8c9229b9f119baa21854bb0761",
+      "sha256": "96fb70552b5d7efb5cc1a61b1d0072eb3472e2d6b1d9ae4cc2eef62e839d5c9f",
       "vector_count": 51,
       "description": "Malformed syntax, invalid parameters, and auth failure rejection vectors (VEC-05)",
       "requirement": "VEC-05"

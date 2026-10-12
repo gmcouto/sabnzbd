@@ -259,13 +259,72 @@ class TestNzbParser:
                 _write_nzb_gz(SAB_CACHE_DIR, "bad_cipher", xml_bad_cipher), NzbObject("bad_cipher")
             )
 
-        # 6. Unsupported mode -> raises YEncEncryptionStructuralError
-        xml_bad_mode = make_nzb(
+    @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
+    def test_yenc_mode_meta_is_ignored(self):
+        """No mode metadata exists (Body Std v1.2 §8, Control Std v1.2 §5): a yenc_mode tag has no effect."""
+        for mode in ("combined", "body-only", "anything"):
+            xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
+ <head>
+  <meta type="yenc_encrypted">true</meta>
+  <meta type="yenc_mode">{mode}</meta>
+  <meta type="password">secret123</meta>
+ </head>
+ <file poster="p@test.com" date="1600000000" subject="test.bin">
+  <segments><segment bytes="1000" number="1">mode_{mode}@test</segment></segments>
+ </file>
+</nzb>"""
+            nzo = NzbObject(f"mode_{mode}")
+            nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, f"mode_{mode}", xml), nzo)
+            assert nzo.yenc_encrypted is True, mode
+            assert nzo.password == "secret123", mode
+
+    @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
+    def test_yenc_meta_values_are_trimmed_and_ascii_case_insensitive(self):
+        """Body Std v1.2 §8: values are trimmed before matching; the stored password is not trimmed."""
+        from sabnzbd.encryption import YEncEncryptionStructuralError
+
+        def make_nzb(meta_entries: list[tuple[str, str]]) -> str:
+            metas = "\n".join(f'  <meta type="{t}">{v}</meta>' for t, v in meta_entries)
+            return f"""<?xml version="1.0" encoding="utf-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
+ <head>
+{metas}
+ </head>
+ <file poster="p@test.com" date="1600000000" subject="test.bin">
+  <segments><segment bytes="1000" number="1">s1@test</segment></segments>
+ </file>
+</nzb>"""
+
+        accepted = [
+            [("yenc_encrypted", "TRUE"), ("password", "pw1")],
+            [("yenc_encrypted", " true "), ("password", "pw2")],
             [
                 ("yenc_encrypted", "true"),
-                ("yenc_mode", "body-only"),
-                ("password", "secret123"),
-            ]
+                ("yenc_version", " 1.2 "),
+                ("yenc_cipher", "xchacha20-poly1305"),
+                ("password", "  padded pw  "),
+            ],
+        ]
+        for idx, entries in enumerate(accepted):
+            nzo = NzbObject(f"accepted_{idx}")
+            nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, f"accepted_{idx}", make_nzb(entries)), nzo)
+            assert nzo.yenc_encrypted is True, idx
+        assert nzo.password == "  padded pw  "
+
+        rejected = [
+            ([("yenc_encrypted", "true"), ("yenc_version", "1.3"), ("password", "pw")], "UNSUPPORTED_VERSION"),
+            ([("yenc_encrypted", "true"), ("yenc_cipher", "AES"), ("password", "pw")], "UNSUPPORTED_CIPHER"),
+        ]
+        for idx, (entries, token) in enumerate(rejected):
+            with pytest.raises(YEncEncryptionStructuralError, match=token):
+                nzbparser.nzbfile_parser(
+                    _write_nzb_gz(SAB_CACHE_DIR, f"rejected_{idx}", make_nzb(entries)), NzbObject(f"rejected_{idx}")
+                )
+
+        # Any other yenc_encrypted value means a plain NZB (Body Std v1.2 §8)
+        plain = NzbObject("plain_yes")
+        nzbparser.nzbfile_parser(
+            _write_nzb_gz(SAB_CACHE_DIR, "plain_yes", make_nzb([("yenc_encrypted", "yes")])), plain
         )
-        with pytest.raises(YEncEncryptionStructuralError, match="UNSUPPORTED_MODE"):
-            nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, "bad_mode", xml_bad_mode), NzbObject("bad_mode"))
+        assert plain.yenc_encrypted is False

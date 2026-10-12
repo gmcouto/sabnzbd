@@ -42,6 +42,15 @@ from sabnzbd.decorators import synchronized, DOWNLOADER_LOCK
 socket.setdefaulttimeout(DEF_NETWORKING_TIMEOUT)
 
 
+def _requires_body(article: "sabnzbd.nzb.Article") -> bool:
+    """Whether the article must be fetched with BODY (RFC 3977 section 6.2.3).
+
+    Only a literal True counts: NZO defaults to False and anything else is not a
+    declared encrypted release, so ordinary articles keep the server's chosen command.
+    """
+    return getattr(article.nzf.nzo, "yenc_encrypted", False) is True
+
+
 class NNTPPermanentError(Exception):
     def __init__(self, msg: str, code: int):
         super().__init__()
@@ -247,7 +256,10 @@ class NewsWrapper:
                 command = utob("STAT <%s>\r\n" % article.article)
             else:
                 command = utob("HEAD <%s>\r\n" % article.article)
-        elif self.server.have_body:
+        elif self.server.have_body or _requires_body(article):
+            # Encrypted articles always use BODY: ARTICLE puts NNTP headers before the
+            # yEnc body and a header blank line is not visible in sabctools' line list
+            # (RFC 3977 section 3.1.1, Body Standard v1.2 section 9).
             command = utob("BODY <%s>\r\n" % article.article)
         else:
             command = utob("ARTICLE <%s>\r\n" % article.article)
@@ -288,6 +300,12 @@ class NewsWrapper:
                     article.article,
                     response.status_code,
                 )
+
+            elif response.status_code == 500 and _requires_body(article) and not article.nzf.nzo.precheck:
+                # This server cannot serve BODY, and an encrypted article has no ARTICLE
+                # fallback. Pass the response to the decoder, which fails it closed as
+                # provider failover (YEncEncryptionCryptoError) and tries another server.
+                article_done = True
 
             elif response.status_code == 500:
                 if article.nzf.nzo.precheck:

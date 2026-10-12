@@ -34,9 +34,7 @@ from sabnzbd.encryption import (
     YEncEncryptionCryptoError,
     YEncEncryptionStructuralError,
     extract_and_remove_yencryption,
-    extract_bootstrap_from_line1,
-    ff1_decrypt,
-    BOOTSTRAP_PREFIX_LEN,
+    neutral_ybegin_name,
 )
 
 # Check for correct SABCTools version
@@ -296,37 +294,22 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
 
     nzf = article.nzf
 
+    # Encrypted articles are only accepted from BODY (222), whose response starts at the
+    # yEnc body. An ARTICLE (220) response starts with NNTP headers whose blank-line
+    # boundary sabctools does not report, and the body must never be found by trial
+    # decryption (Body Standard v1.2 section 9). Any other status fails closed as
+    # provider failover.
+    if _is_yenc_encrypted(article) and isinstance(response.status_code, int) and response.status_code != 222:
+        raise YEncEncryptionCryptoError(
+            f"Encrypted article {getattr(article, 'article', '')} answered with status {response.status_code}, not BODY"
+        )
+
     # Encrypted wire response: sabctools couldn't decode because control lines were FF1-encrypted
     if response.bytes_decoded == 0 and getattr(response, "lines", None) and _is_yenc_encrypted(article):
         lines = [line.encode("latin-1") if isinstance(line, str) else line for line in response.lines]
 
-        # Transport seam (RFC 3977 §3.1.1): a native ARTICLE response (status 220)
-        # includes NNTP article headers before the yEnc body; BODY (222) does not.
-        # Scan for Line 1 of the encrypted body so bootstrap extraction starts at the actual
-        # article body, regardless of which command fetched this article.
         password = getattr(article.nzf.nzo, "password", None)
         adapter = _get_decryption_adapter(article, password=password)
-
-        if response.status_code == 220:
-            body_start = None
-            for idx, line in enumerate(lines):
-                cand = line[1:] if line.startswith(b"..") else line
-                if len(cand) >= 22:
-                    try:
-                        s, seg_idx_val = extract_bootstrap_from_line1(cand)
-                        key = adapter.get_master_key(s)
-                        ek_val, tw_val = adapter.derive_control_keys(key, seg_idx_val, 1)
-                        pt_dec = ff1_decrypt(ek_val, tw_val, cand[BOOTSTRAP_PREFIX_LEN:])
-                        if pt_dec.startswith(b"=ybegin"):
-                            body_start = idx
-                            break
-                    except Exception:
-                        pass
-            if body_start is None:
-                raise YEncEncryptionCryptoError(
-                    f"No encrypted body found in ARTICLE response {getattr(article, 'article', '')}"
-                )
-            lines = lines[body_start:]
 
         # Dot-unstuffing adapter (RFC 3977 §3.1.1 transport boundary). On the encrypted
         # path sabctools cannot recognize yEnc (the =ybegin line is FF1-encrypted), so
@@ -356,6 +339,7 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
 
         # Constant synthetic response status; the sub-decoder never reads the Message-ID.
         # sabctools requires CRLF framing for its internal parsing state machine.
+        clean_yenc = neutral_ybegin_name(clean_yenc)
         clean_yenc_crlf = clean_yenc.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
         clean_wire = b"222 0 <x>\r\n" + clean_yenc_crlf
         if not clean_wire.endswith(b"\r\n"):

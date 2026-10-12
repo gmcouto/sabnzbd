@@ -384,6 +384,15 @@ def process_single_nzb(
     return result, nzo_ids
 
 
+def _meta_ascii_equal(value: str, expected: str) -> bool:
+    """Compare a trimmed NZB meta value with an expected token, ASCII case-insensitively (Body Std v1.2 §8).
+
+    Only the comparison is trimmed; the stored password is never passed through here.
+    """
+    trimmed = value.strip()
+    return trimmed.isascii() and trimmed.lower() == expected.lower()
+
+
 def nzbfile_parser(full_nzb_path: str, nzo):
     # For type-hinting
     nzo: NzbObject
@@ -510,26 +519,22 @@ def nzbfile_parser(full_nzb_path: str, nzo):
     if skipped_files:
         logging.warning(T("Failed to import %s files from %s"), skipped_files, nzo.filename)
 
-    if any(v.lower() == "true" for v in nzo.meta.get("yenc_encrypted", [])):
+    # Metadata values are trimmed before matching; ASCII case-insensitive where the standard says so
+    # (Body Standard v1.2 §8). Undefined tags such as yenc_mode are ignored (no mode metadata exists).
+    if any(_meta_ascii_equal(v, "true") for v in nzo.meta.get("yenc_encrypted", [])):
         nzo.yenc_encrypted = True
 
         # Forward-Compatibility Metadata Gating (Body Standard v1.2 §8)
         for ver in nzo.meta.get("yenc_version", []):
-            if ver != "1.2":
+            if ver.strip() != "1.2":
                 raise YEncEncryptionStructuralError(
                     f"UNSUPPORTED_VERSION: NZB declares yenc_version '{ver}', only '1.2' is supported"
                 )
 
         for cipher in nzo.meta.get("yenc_cipher", []):
-            if cipher != "XChaCha20-Poly1305":
+            if not _meta_ascii_equal(cipher, "XChaCha20-Poly1305"):
                 raise YEncEncryptionStructuralError(
                     f"UNSUPPORTED_CIPHER: NZB declares yenc_cipher '{cipher}', only 'XChaCha20-Poly1305' is supported"
-                )
-
-        for mode in nzo.meta.get("yenc_mode", []):
-            if mode.lower() != "combined":
-                raise YEncEncryptionStructuralError(
-                    f"UNSUPPORTED_MODE: NZB declares yenc_mode '{mode}', only 'combined' is supported"
                 )
 
         raw_meta_passwords = nzo.meta.get("password") or []

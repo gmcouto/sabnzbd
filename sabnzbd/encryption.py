@@ -27,6 +27,7 @@ actionable diagnostic when a package is missing.
 import hashlib
 import hmac
 import math
+import re
 import struct
 import threading
 from typing import Any, Optional
@@ -295,6 +296,47 @@ def parse_yencryption_line(line: str | bytes) -> Optional[dict[str, Any]]:
     }
 
 
+# name= is the last =ybegin keyword and its value runs to the end of the line (Body Std v1.2 §2.1).
+_NAME_KEYWORD = re.compile(rb"(?:^|[ \t])name=")
+
+
+def _ybegin_header(line1: bytes) -> tuple[list[bytes], Optional[bytes]]:
+    """Split a restored =ybegin line into its keywords before name= and the raw name value.
+
+    Only keywords before name= describe the layout (Control Std v1.2 §5 step 4): a name such as
+    ``my part=2.bin`` must not make a single-part article multipart. The name value is returned as
+    raw bytes, without decoding, because it is the AAD subject (Body Std v1.2 §2.1).
+    """
+    content = line1.rstrip(b"\r\n")
+    match = _NAME_KEYWORD.search(content)
+    if match is None:
+        return content.split(), None
+    return content[: match.start()].split(), content[match.end() :]
+
+
+def _is_multipart_ybegin(header_tokens: list[bytes]) -> bool:
+    """Multipart only when a part= keyword precedes name= (Control Std v1.2 §5 step 4)."""
+    return any(token.startswith(b"part=") for token in header_tokens)
+
+
+def _keyword_values(tokens: list[bytes]) -> dict[bytes, bytes]:
+    """Map keyword=value tokens to their raw values; tokens without '=' are ignored."""
+    values: dict[bytes, bytes] = {}
+    for token in tokens:
+        key, sep, value = token.partition(b"=")
+        if sep:
+            values[key] = value
+    return values
+
+
+def _required_int(values: dict[bytes, bytes], key: bytes, line_name: str) -> int:
+    """Read a mandatory decimal keyword needed for the AAD; a missing or malformed one fails under PROVIDER_FAILOVER."""
+    raw = values.get(key, b"")
+    if not raw.isdigit():
+        raise YEncEncryptionCryptoError(f"PROVIDER_FAILOVER: {line_name} lacks a valid {key.decode()}= parameter")
+    return int(raw)
+
+
 def extract_and_remove_yencryption(yenc_block: bytes) -> tuple[dict[str, Any], bytes]:
     """Extract and remove the single canonical =yencryption line from a restored yEnc article block.
 
@@ -322,7 +364,8 @@ def extract_and_remove_yencryption(yenc_block: bytes) -> tuple[dict[str, Any], b
     if not line1.startswith(b"=ybegin"):
         raise YEncEncryptionCryptoError("Line 1 does not start with =ybegin")
 
-    is_multipart = any(token.startswith(b"part=") for token in line1.split())
+    header_tokens, name_bytes = _ybegin_header(line1)
+    is_multipart = _is_multipart_ybegin(header_tokens)
 
     if is_multipart:
         if len(raw_lines) < 3:
@@ -352,31 +395,49 @@ def extract_and_remove_yencryption(yenc_block: bytes) -> tuple[dict[str, Any], b
         )
 
     # Mandatory name parameter for AAD (Body Standard v1.2 §2.1)
-    name_idx = line1.find(b"name=")
-    if name_idx == -1:
+    if name_bytes is None:
         raise YEncEncryptionCryptoError("PROVIDER_FAILOVER: missing mandatory name parameter in =ybegin")
-    name_bytes = line1[name_idx + 5 :].rstrip(b"\r\n")
     if not name_bytes:
         raise YEncEncryptionCryptoError("PROVIDER_FAILOVER: empty name parameter in =ybegin")
 
+    # AAD geometry comes only from the restored =ybegin/=ypart keywords (Body Std v1.2 §2.1).
+    # A missing or malformed keyword the AAD needs is PROVIDER_FAILOVER, never a silent default.
+    ybegin_values = _keyword_values(header_tokens)
     if is_multipart:
-        ybegin_tokens = {t.split(b"=")[0]: t.split(b"=")[1] for t in line1.split() if b"=" in t}
-        part_number = int(ybegin_tokens.get(b"part", 1))
-        tokens = {t.split(b"=")[0]: t.split(b"=")[1] for t in line2.split() if b"=" in t}
-        part_begin = int(tokens.get(b"begin", 1))
-        part_end = int(tokens.get(b"end", 1))
+        part_number = _required_int(ybegin_values, b"part", "=ybegin")
+        ypart_values = _keyword_values(line2.split())
+        part_begin = _required_int(ypart_values, b"begin", "=ypart")
+        part_end = _required_int(ypart_values, b"end", "=ypart")
+        if part_end < part_begin:
+            raise YEncEncryptionCryptoError("PROVIDER_FAILOVER: =ypart end is before begin")
         segment_bytes = part_end - part_begin + 1
     else:
-        tokens = {t.split(b"=")[0]: t.split(b"=")[1] for t in line1.split() if b"=" in t}
         part_number = 1
         part_begin = 1
-        segment_bytes = int(tokens.get(b"size", 0))
+        segment_bytes = _required_int(ybegin_values, b"size", "=ybegin")
 
     params["aad"] = build_aad(name_bytes, part_number, part_begin, segment_bytes)
     params["segment_bytes"] = segment_bytes
 
     clean_lines = raw_lines[:yenc_idx] + raw_lines[yenc_idx + 1 :]
     return params, b"".join(clean_lines)
+
+
+def neutral_ybegin_name(yenc_block: bytes) -> bytes:
+    """Return a copy of a restored yEnc block whose =ybegin name= value is a fixed placeholder.
+
+    The AAD is already computed from the raw name (Body Std v1.2 §2.1), so the name is not needed for
+    body parsing. sabctools 9.7.1 treats any ``part=`` substring in =ybegin as multipart, so a single-part
+    name such as ``my part=2.bin`` would make the sub-decoder expect =ypart. The header keywords (which
+    decide the layout) are kept unchanged; only the name value is replaced.
+    """
+    end = yenc_block.find(b"\n")
+    first_line = yenc_block if end == -1 else yenc_block[: end + 1]
+    content, ending = _split_ending(first_line)
+    header_tokens, name_bytes = _ybegin_header(content)
+    if name_bytes is None:
+        return yenc_block
+    return b" ".join(header_tokens) + b" name=x" + ending + yenc_block[len(first_line) :]
 
 
 def extract_bootstrap_from_line1(line1: bytes) -> tuple[bytes, int]:
@@ -522,6 +583,23 @@ class DecryptionAdapter:
         """Decrypt a single control line with FF1 over Radix 253."""
         return ff1_decrypt(enc_key, tweak, ciphertext)
 
+    def _restore_yencryption_line(
+        self, master_key: bytes, segment_index: int, wire_line: bytes, line_index: int
+    ) -> bytes:
+        """Decrypt the =yencryption line at its fixed position (Control Std v1.2 §5 step 4b).
+
+        A decryption error or a non-=yencryption result is PROVIDER_FAILOVER. The position is
+        fixed, so there is no fallback to treating the line as data.
+        """
+        content, ending = _split_ending(wire_line)
+        enc_key, tweak = self.derive_control_keys(master_key, segment_index, line_index)
+        pt_enc = self.decrypt_control_line(content, enc_key, tweak)
+        if not pt_enc.startswith(b"=yencryption"):
+            raise YEncEncryptionCryptoError(
+                f"PROVIDER_FAILOVER: line {line_index} is not =yencryption at its fixed position"
+            )
+        return pt_enc + ending
+
     def restore_control_lines(self, yenc_block: bytes) -> tuple[bytes, bytes, int]:
         """Restore encrypted control lines in a yEnc article block per Control Lines Standard v1.2 §5.
 
@@ -559,7 +637,7 @@ class DecryptionAdapter:
                 f"Article block too short for encrypted yEnc: {len(raw_lines)} line(s) (minimum 2)"
             )
 
-        is_multipart = any(token.startswith(b"part=") for token in pt1.split())
+        is_multipart = _is_multipart_ybegin(_ybegin_header(pt1)[0])
         restored_lines: list[bytes] = [pt1 + line1_ending]
 
         if is_multipart:
@@ -576,27 +654,13 @@ class DecryptionAdapter:
 
             first_data_line_index = 3
             if len(raw_lines) > 3:
-                enc_content, enc_ending = _split_ending(raw_lines[2])
-                enc_key, tweak = self.derive_control_keys(master_key, segment_index, 3)
-                try:
-                    pt_enc = self.decrypt_control_line(enc_content, enc_key, tweak)
-                    if pt_enc.startswith(b"=yencryption"):
-                        restored_lines.append(pt_enc + enc_ending)
-                        first_data_line_index = 4
-                except Exception:
-                    pass
+                restored_lines.append(self._restore_yencryption_line(master_key, segment_index, raw_lines[2], 3))
+                first_data_line_index = 4
         else:
             first_data_line_index = 2
             if len(raw_lines) > 2:
-                enc_content, enc_ending = _split_ending(raw_lines[1])
-                enc_key, tweak = self.derive_control_keys(master_key, segment_index, 2)
-                try:
-                    pt_enc = self.decrypt_control_line(enc_content, enc_key, tweak)
-                    if pt_enc.startswith(b"=yencryption"):
-                        restored_lines.append(pt_enc + enc_ending)
-                        first_data_line_index = 3
-                except Exception:
-                    pass
+                restored_lines.append(self._restore_yencryption_line(master_key, segment_index, raw_lines[1], 2))
+                first_data_line_index = 3
 
         # Data lines (D through N-1) pass through untouched, byte for byte, terminators included
         for idx in range(first_data_line_index - 1, len(raw_lines) - 1):
