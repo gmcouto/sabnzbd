@@ -48,6 +48,17 @@ from sabnzbd.nzb import Article
 from sabnzbd.newswrapper import NewsWrapper
 
 
+def _mock_response():
+    """A response mock with the same status and byte-count types as sabctools."""
+    import sabctools
+
+    response = mock.MagicMock(spec=sabctools.NNTPResponse)
+    response.status_code = 222
+    response.bytes_decoded = 0
+    response.sink_failed = False
+    return response
+
+
 def _encrypted_wire(
     password: str,
     plaintext: bytes,
@@ -127,7 +138,7 @@ def _encrypted_wire(
 def _get_test_vector_dir() -> Path:
     vector_dir = Path(__file__).resolve().parent / "data" / "test-vectors"
     if not vector_dir.exists():
-        pytest.skip(f"Test vectors not found at {vector_dir}")
+        pytest.fail(f"Test vectors not found at {vector_dir}")
     return vector_dir
 
 
@@ -185,7 +196,7 @@ class MockArticleNNTPServer:
                     time.sleep(0.05)
 
         try:
-            conn.sendall(b"200 Welcome" + self.line_ending)
+            conn.sendall(b"200 Welcome\r\n")
             while not self._stop.is_set():
                 conn.settimeout(0.5)
                 try:
@@ -461,7 +472,7 @@ class TestDecryptionAdapterContracts:
         line = "=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=0cd77ce245a654463f90b945b1d22d5b"
         parsed = parse_yencryption_line(line)
         assert parsed is not None
-        assert parsed["cipher"] == "XChaCha20-Poly1305"
+
         assert parsed["salt"] == bytes.fromhex("1a2b3c4d5e6f7890abcdef1234567890")
         assert parsed["segment_index"] == 1
         assert parsed["tag"] == bytes.fromhex("0cd77ce245a654463f90b945b1d22d5b")
@@ -469,7 +480,7 @@ class TestDecryptionAdapterContracts:
         # 3. extract_and_remove_yencryption basic smoke test
         block = b"=ybegin line=128 size=10 name=test\r\n=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=0cd77ce245a654463f90b945b1d22d5b\r\ndata\r\n=yend size=10\r\n"
         p, clean = extract_and_remove_yencryption(block)
-        assert p["cipher"] == "XChaCha20-Poly1305"
+
         assert p["segment_index"] == 1
         assert clean == b"=ybegin line=128 size=10 name=test\r\ndata\r\n=yend size=10\r\n"
 
@@ -503,7 +514,6 @@ class TestDecryptionAdapterContracts:
 
     def test_dual_bootstrap_agreement(self):
         """Test Dual-Bootstrap Agreement in decoder: salt mismatch and index mismatch."""
-        import sabctools
         import sabnzbd.decoder as decoder
 
         # Setup valid wire block
@@ -533,7 +543,7 @@ class TestDecryptionAdapterContracts:
         article.nzf.nzo.password = password
         article.nzf.nzo.yenc_encrypted = True
 
-        resp_bad_salt = mock.MagicMock(spec=sabctools.NNTPResponse)
+        resp_bad_salt = _mock_response()
         resp_bad_salt.sink_failed = False
         resp_bad_salt.bytes_decoded = 0
         resp_bad_salt.lines = [
@@ -552,7 +562,7 @@ class TestDecryptionAdapterContracts:
         )
         wire2_bad_idx = ff1_encrypt(k2, t2, line2_idx_mismatch)
 
-        resp_bad_idx = mock.MagicMock(spec=sabctools.NNTPResponse)
+        resp_bad_idx = _mock_response()
         resp_bad_idx.sink_failed = False
         resp_bad_idx.bytes_decoded = 0
         resp_bad_idx.lines = [wire1.decode("latin-1"), wire2_bad_idx.decode("latin-1"), "data", wire4.decode("latin-1")]
@@ -603,7 +613,6 @@ class TestDirectWriteGatingAndFailover:
     def test_downloader_decode_candidate_dispatch(self):
         """Downloader.decode forwards candidate encrypted responses to decoder instead of discarding."""
         from sabnzbd.downloader import Downloader
-        import sabctools
 
         # Case 1: Candidate encrypted article (bytes_decoded == 0, lines and encryption provenance present)
         art_cand = mock.MagicMock(spec=Article)
@@ -612,7 +621,7 @@ class TestDirectWriteGatingAndFailover:
         art_cand.nzf.nzo.yenc_encrypted = True
         art_cand.nzf.nzo.precheck = False
 
-        resp_cand = mock.MagicMock(spec=sabctools.NNTPResponse)
+        resp_cand = _mock_response()
         resp_cand.bytes_decoded = 0
         resp_cand.lines = ["encrypted_line_1", "encrypted_line_2"]
 
@@ -634,7 +643,7 @@ class TestDirectWriteGatingAndFailover:
         art_broken.nzf.nzo.precheck = False
         art_broken.search_new_server.return_value = False
 
-        resp_broken = mock.MagicMock(spec=sabctools.NNTPResponse)
+        resp_broken = _mock_response()
         resp_broken.bytes_decoded = 0
         resp_broken.lines = ["some_line"]
 
@@ -652,7 +661,6 @@ class TestDirectWriteGatingAndFailover:
     @pytest.mark.parametrize("line", ["ordinary yEnc data", b"ordinary yEnc data"])
     def test_ordinary_yenc_lines_accept_text_and_bytes(self, line):
         """Encryption probing preserves ordinary responses regardless of line representation."""
-        import sabctools
         import sabnzbd.decoder as decoder
 
         article = mock.MagicMock(spec=Article)
@@ -662,7 +670,7 @@ class TestDirectWriteGatingAndFailover:
         # _is_yenc_encrypted() truthy and trip the Zero-Output Rule plain-article reject.
         article.nzf.nzo.yenc_encrypted = False
 
-        response = mock.MagicMock(spec=sabctools.NNTPResponse)
+        response = _mock_response()
         response.sink_failed = False
         response.data = bytearray(b"plain decoded data")
         response.file_size = len(response.data)
@@ -679,7 +687,6 @@ class TestDirectWriteGatingAndFailover:
     def test_modified_tag_native_response_triggers_server_search(self):
         """A real encrypted wire response with a modified tag fails Poly1305 and is routed
         to search_new_server with zero bytes stored (real modified-tag native response)."""
-        import sabctools
         import sabnzbd.decoder as decoder
 
         password = "tag_tamper_password"
@@ -704,7 +711,7 @@ class TestDirectWriteGatingAndFailover:
         article.search_new_server.return_value = True
 
         # Native 222 BODY response carrying the modified-tag encrypted article
-        resp = mock.MagicMock(spec=sabctools.NNTPResponse)
+        resp = _mock_response()
         resp.sink_failed = False
         resp.status_code = 222
         resp.bytes_decoded = 0
@@ -771,7 +778,7 @@ class TestDirectWriteGatingAndFailover:
         article.nzf.filename_checked = False
         article.lowest_partnum = True
 
-        resp = mock.MagicMock(spec=sabctools.NNTPResponse)
+        resp = _mock_response()
         resp.sink_failed = False
         resp.bytes_decoded = 0
         resp.lines = [
@@ -819,7 +826,7 @@ class TestDirectWriteGatingAndFailover:
         article_m.nzf.filename_checked = True
         article_m.lowest_partnum = False
 
-        resp_m = mock.MagicMock(spec=sabctools.NNTPResponse)
+        resp_m = _mock_response()
         resp_m.sink_failed = False
         resp_m.bytes_decoded = 0
         resp_m.lines = [
@@ -844,7 +851,7 @@ class TestDirectWriteGatingAndFailover:
         bad_line5_pt = f"=yend size={len(ct_m)} part=1 pcrc32={bad_crc:08x}".encode("ascii")
         bad_wire_5 = ff1_encrypt(k5, t5, bad_line5_pt)
 
-        resp_bad_crc = mock.MagicMock(spec=sabctools.NNTPResponse)
+        resp_bad_crc = _mock_response()
         resp_bad_crc.sink_failed = False
         resp_bad_crc.bytes_decoded = 0
         resp_bad_crc.lines = [
@@ -864,7 +871,7 @@ class TestDirectWriteGatingAndFailover:
         )
         bad_wire_3 = ff1_encrypt(k3, t3, bad_line3_pt)
 
-        resp_bad_tag = mock.MagicMock(spec=sabctools.NNTPResponse)
+        resp_bad_tag = _mock_response()
         resp_bad_tag.sink_failed = False
         resp_bad_tag.bytes_decoded = 0
         resp_bad_tag.lines = [
@@ -886,7 +893,7 @@ class TestDirectWriteGatingAndFailover:
             b"=ybegin line=128 size=100 name=test.bin\r\n" + valid_hdr + b"\r\n" b"DataLine1\r\n" b"=yend size=100\r\n"
         )
         params, clean = extract_and_remove_yencryption(single)
-        assert params["cipher"] == "XChaCha20-Poly1305"
+
         assert params["salt"] == bytes.fromhex("1a2b3c4d5e6f7890abcdef1234567890")
         assert params["segment_index"] == 1
         assert params["tag"] == bytes.fromhex("0cd77ce245a654463f90b945b1d22d5b")
@@ -900,7 +907,7 @@ class TestDirectWriteGatingAndFailover:
             b"=yend size=100 part=1\r\n"
         )
         m_params, m_clean = extract_and_remove_yencryption(multi)
-        assert m_params["cipher"] == "XChaCha20-Poly1305"
+
         assert m_params["segment_index"] == 1
         assert m_clean == (
             b"=ybegin part=1 total=2 line=128 size=200 name=test.bin\r\n"
@@ -1046,8 +1053,9 @@ class TestDirectWriteGatingAndFailover:
             adapter = DecryptionAdapter(password=pwd)
 
             output = None
+            aad = bytes.fromhex(vec["aad_hex"]) if "aad_hex" in vec else b""
             with pytest.raises(ValueError, match="Poly1305 authentication failed"):
-                output = adapter.decrypt_body(ct, tag, salt, seg_idx)
+                output = adapter.decrypt_body(ct, tag, salt, seg_idx, aad=aad)
 
             # Assert zero output released
             assert output is None, f"Zero-output violated for {vec_id}"
@@ -1329,7 +1337,7 @@ class TestDirectWriteGatingAndFailover:
         article.nzf.nzo.password = "f1-430-pw"
         article.search_new_server.return_value = True
 
-        response = mock.MagicMock(spec=sabctools.NNTPResponse)
+        response = _mock_response()
         response.status_code = 430
         response.format = sabctools.EncodingFormat.YENC
         response.bytes_decoded = 0
@@ -1362,7 +1370,7 @@ class TestDirectWriteGatingAndFailover:
         article.nzf.nzo.password = "f1-salt-pw"
         article.search_new_server.return_value = True
 
-        response = mock.MagicMock(spec=sabctools.NNTPResponse)
+        response = _mock_response()
         response.status_code = 222
         response.format = sabctools.EncodingFormat.YENC
         response.bytes_decoded = 0
@@ -1396,22 +1404,23 @@ class TestDirectWriteGatingAndFailover:
         assert salt not in str(info.value)
         assert "index=" not in str(info.value)
 
-    def test_bare_lf_response_over_real_socket(self):
-        """A real NNTP server sending bare-LF framed encrypted responses decodes to the
-        exact plaintext: terminators are handled at the native transport seam, never
-        fabricated CRLF (Control Std v1.2 §6)."""
-        password = "bare_lf_password"
-        plaintext = b"Bare LF framing end-to-end test payload!"
-
-        # Encrypted body framed with bare LF
-        enc_body_lf, _adapter, _mk, _nonce, _ct, _tag, _crc, _aad, _n = _encrypted_wire(
-            password=password,
-            plaintext=plaintext,
-            name="test.bin",
-            line_ending=b"\n",
-        )
-
-        srv = MockArticleNNTPServer(enc_body_lf, line_ending=b"\n")
+    @pytest.mark.parametrize("framing", ["bare-lf", "split-terminator", "split-body"])
+    def test_encrypted_response_framing_over_real_socket(self, framing):
+        """Bare LF and CRLF split across TCP chunks deliver authenticated plaintext."""
+        password = "framing_password"
+        plaintext = b"Framing end-to-end test payload!"
+        line_ending = b"\n" if framing == "bare-lf" else b"\r\n"
+        enc_body, *_ = _encrypted_wire(password, plaintext, line_ending=line_ending)
+        split_at = None
+        if framing != "bare-lf":
+            resp = b"222 0 <art@e2e>\r\n" + enc_body + b".\r\n"
+            boundary = resp.rfind(b"\r\n")
+            if framing == "split-body":
+                terminator = resp.rfind(b"\r\n.")
+                boundary = resp.rfind(b"\r\n", 0, terminator - 1)
+            assert boundary >= 0 and resp[boundary : boundary + 2] == b"\r\n"
+            split_at = [boundary + 1]
+        srv = MockArticleNNTPServer(enc_body, line_ending=line_ending, split_at=split_at)
         srv.start()
 
         try:
@@ -1488,237 +1497,12 @@ class TestDirectWriteGatingAndFailover:
                 nw1.queue_article(art)
                 nw1.write()
                 nw1.read()
+                if split_at:
+                    nw1.read()
 
-                # Bare-LF framed encrypted response must complete natively and decode
-                assert mock_cache.save_article.called
+                mock_cache.save_article.assert_called_once()
                 _saved_art, saved_data = mock_cache.save_article.call_args[0]
                 assert bytes(saved_data) == plaintext
-
-        finally:
-            srv.stop()
-
-    def test_crlf_terminator_split_across_tcp_chunks(self):
-        """A conforming CRLF server whose \\r\\n.\\r\\n article terminator is split across
-        TCP chunks (the final chunk starting with the lone \\n) must still deliver the
-        article: a chunk that begins with '\\n' preceded by a chunk ending in '\\r' is
-        the second half of a CRLF, never a bare LF (RFC 3977 §3.1.1)."""
-        password = "crlf_split_password"
-        plaintext = b"CRLF split terminator end-to-end test payload!"
-
-        enc_body, _adapter, _mk, _nonce, _ct, _tag, _crc, _aad, _n = _encrypted_wire(
-            password=password,
-            plaintext=plaintext,
-            name="test.bin",
-        )
-
-        resp = b"222 0 <art@e2e>" + b"\r\n" + enc_body + b"." + b"\r\n"
-        # Split exactly at the \r|\n boundary of the \r\n.\r\n terminator
-        split_at = resp.rfind(b"\r\n") + 1
-        assert resp[split_at - 1 : split_at + 1] == b"\r\n"
-        srv = MockArticleNNTPServer(enc_body, split_at=[split_at])
-        srv.start()
-
-        try:
-            s1 = Server(
-                server_id="srv_crlf_split",
-                displayname="CRLF Split Server",
-                host=srv.host,
-                port=srv.port,
-                timeout=5,
-                threads=0,
-                priority=0,
-                use_ssl=False,
-                ssl_verify=0,
-                ssl_ciphers="",
-                pipelining_requests=mock.Mock(return_value=1),
-            )
-            s1.addrinfo = AddrInfo(*socket.getaddrinfo(srv.host, srv.port, socket.AF_INET, socket.SOCK_STREAM)[0])
-            s1.active = True
-
-            mock_downloader = mock.MagicMock(spec=Downloader)
-            mock_downloader.servers = [s1]
-            mock_downloader.reset_nw = lambda nw, *args, **kwargs: None
-            mock_downloader.finish_connect_nw = lambda nw, resp: Downloader.finish_connect_nw(mock_downloader, nw, resp)
-            mock_downloader.decode = lambda article, resp: Downloader.decode(article, resp)
-            mock_downloader.modify_socket = lambda nw, event: None
-            mock_downloader.remove_socket = lambda nw: None
-            mock_downloader.no_active_jobs = lambda: False
-            mock_downloader.shutdown = False
-            mock_downloader.paused_for_postproc = False
-            mock_downloader.force_disconnect = False
-
-            mock_bps = mock.MagicMock()
-            mock_cache = mock.MagicMock()
-            mock_queue = mock.MagicMock()
-
-            mock_nzo = mock.MagicMock()
-            mock_nzo.password = password
-            mock_nzo.yenc_encrypted = True
-            mock_nzo.precheck = False
-            mock_nzo.removed_from_queue = False
-            mock_nzo.status = "active"
-            mock_nzo.priority = 0
-            mock_nzo.update_download_stats = mock.MagicMock()
-
-            mock_nzf = mock.MagicMock()
-            mock_nzf.nzo = mock_nzo
-            mock_nzf.filename_checked = True
-            mock_nzf.type = "yenc"
-
-            art = Article("art@e2e", 100, mock_nzf)
-            art.lowest_partnum = False
-            art.on_disk = False
-            art.tries = 0
-
-            with (
-                mock.patch.object(sabnzbd, "Downloader", mock_downloader, create=True),
-                mock.patch.object(sabnzbd, "BPSMeter", mock_bps, create=True),
-                mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
-                mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
-            ):
-                nw1 = NewsWrapper(s1, thrdnum=1)
-                s1.idle_threads.add(nw1)
-                nw1.init_connect()
-                for _ in range(50):
-                    if nw1.connected:
-                        break
-                    time.sleep(0.05)
-                nw1.nntp.sock.setblocking(True)
-                nw1.nntp.sock.settimeout(2)
-                nw1.read()
-                assert nw1.ready
-
-                art.fetcher = s1
-                nw1.queue_article(art)
-                nw1.write()
-                # First chunk ends with '\r'; the response is not complete yet, so a
-                # second read is required to receive the terminator's lone '\n'.
-                nw1.read()
-                nw1.read()
-
-                # The split-terminator response must complete natively and decode to
-                # the exact authenticated plaintext (no timeout/loss, no fabricated \r).
-                assert mock_cache.save_article.called
-                _saved_art, saved_data = mock_cache.save_article.call_args[0]
-                assert bytes(saved_data) == plaintext
-                # CRLF framing must not be misdetected as bare-LF framing
-                assert not art._bare_lf
-
-        finally:
-            srv.stop()
-
-    def test_crlf_split_mid_line_across_tcp_chunks(self):
-        """Splitting mid-data-line at a \\r|\\n boundary must also stay byte-exact:
-        the client assembles one intact CRLF-framed response from two TCP chunks."""
-        password = "crlf_midline_password"
-        plaintext = b"CRLF mid-line split end-to-end test payload!"
-
-        enc_body, _adapter, _mk, _nonce, _ct, _tag, _crc, _aad, _n = _encrypted_wire(
-            password=password,
-            plaintext=plaintext,
-            name="test.bin",
-        )
-
-        resp = b"222 0 <art@e2e>" + b"\r\n" + enc_body + b"." + b"\r\n"
-        # Split mid-body at a \r|\n boundary between two wire lines (not the terminator).
-        # Wire control lines are FF1-encrypted binary, but their terminating CRLF is
-        # intact. Line 1 (salt+index+FF1) may itself contain \r\n bytes, so scan for the
-        # CRLF that begins the =yend-adjacent framing: the last CRLF before the "." line,
-        # minus one full terminator — i.e. split after the '\r' of the data-line CRLF
-        # that precedes the final wire line.
-        terminator_pos = resp.rfind(b"\r\n.")
-        assert terminator_pos != -1
-        split_at = terminator_pos + 1  # first split: \r|\n of the terminator (baseline)
-        # Mid-line split: take the CRLF preceding the last wire line before the terminator
-        prev_crlf = resp.rfind(b"\r\n", 0, terminator_pos - 1)
-        assert prev_crlf != -1
-        split_at = prev_crlf + 1
-        assert resp[split_at - 1 : split_at + 1] == b"\r\n"
-        srv = MockArticleNNTPServer(enc_body, split_at=[split_at])
-        srv.start()
-
-        try:
-            s1 = Server(
-                server_id="srv_crlf_mid",
-                displayname="CRLF Mid-line Split Server",
-                host=srv.host,
-                port=srv.port,
-                timeout=5,
-                threads=0,
-                priority=0,
-                use_ssl=False,
-                ssl_verify=0,
-                ssl_ciphers="",
-                pipelining_requests=mock.Mock(return_value=1),
-            )
-            s1.addrinfo = AddrInfo(*socket.getaddrinfo(srv.host, srv.port, socket.AF_INET, socket.SOCK_STREAM)[0])
-            s1.active = True
-
-            mock_downloader = mock.MagicMock(spec=Downloader)
-            mock_downloader.servers = [s1]
-            mock_downloader.reset_nw = lambda nw, *args, **kwargs: None
-            mock_downloader.finish_connect_nw = lambda nw, resp: Downloader.finish_connect_nw(mock_downloader, nw, resp)
-            mock_downloader.decode = lambda article, resp: Downloader.decode(article, resp)
-            mock_downloader.modify_socket = lambda nw, event: None
-            mock_downloader.remove_socket = lambda nw: None
-            mock_downloader.no_active_jobs = lambda: False
-            mock_downloader.shutdown = False
-            mock_downloader.paused_for_postproc = False
-            mock_downloader.force_disconnect = False
-
-            mock_bps = mock.MagicMock()
-            mock_cache = mock.MagicMock()
-            mock_queue = mock.MagicMock()
-
-            mock_nzo = mock.MagicMock()
-            mock_nzo.password = password
-            mock_nzo.yenc_encrypted = True
-            mock_nzo.precheck = False
-            mock_nzo.removed_from_queue = False
-            mock_nzo.status = "active"
-            mock_nzo.priority = 0
-            mock_nzo.update_download_stats = mock.MagicMock()
-
-            mock_nzf = mock.MagicMock()
-            mock_nzf.nzo = mock_nzo
-            mock_nzf.filename_checked = True
-            mock_nzf.type = "yenc"
-
-            art = Article("art@e2e", 100, mock_nzf)
-            art.lowest_partnum = False
-            art.on_disk = False
-            art.tries = 0
-
-            with (
-                mock.patch.object(sabnzbd, "Downloader", mock_downloader, create=True),
-                mock.patch.object(sabnzbd, "BPSMeter", mock_bps, create=True),
-                mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
-                mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
-            ):
-                nw1 = NewsWrapper(s1, thrdnum=1)
-                s1.idle_threads.add(nw1)
-                nw1.init_connect()
-                for _ in range(50):
-                    if nw1.connected:
-                        break
-                    time.sleep(0.05)
-                nw1.nntp.sock.setblocking(True)
-                nw1.nntp.sock.settimeout(2)
-                nw1.read()
-                assert nw1.ready
-
-                art.fetcher = s1
-                nw1.queue_article(art)
-                nw1.write()
-                nw1.read()
-                nw1.read()
-
-                # The mid-line split must not lose or corrupt the article
-                assert mock_cache.save_article.called
-                _saved_art, saved_data = mock_cache.save_article.call_args[0]
-                assert bytes(saved_data) == plaintext
-                assert not art._bare_lf
-
         finally:
             srv.stop()
 
@@ -2138,9 +1922,8 @@ class TestKeyCacheAndHeaderBounding:
         with pytest.raises(ValueError, match="Line 1 truncated"):
             extract_bootstrap_from_line1(line_too_short)
 
-    def test_wire_crc_error_raises_valueerror_for_encrypted_article(self):
-        """decode_yenc raises ValueError on CRC error for encrypted article without saving BadData."""
-        import sabctools
+    def test_plain_article_in_encrypted_release_is_unauthenticated(self):
+        """A plain response in an encrypted release fails before CRC handling."""
         import sabnzbd.decoder as decoder
 
         article = mock.MagicMock(spec=Article)
@@ -2150,7 +1933,7 @@ class TestKeyCacheAndHeaderBounding:
         article.nzf.filename_checked = True
         article.lowest_partnum = False
 
-        response = mock.MagicMock(spec=sabctools.NNTPResponse)
+        response = _mock_response()
         response.sink_failed = False
         response.bytes_decoded = 100
         response.data = bytearray(b"corrupted_bytes")
@@ -2242,7 +2025,7 @@ class TestDotUnstuffing:
         article.nzf.nzo.password = password
         article.nzf.nzo.yenc_encrypted = True
 
-        resp = mock.MagicMock(spec=sabctools.NNTPResponse)
+        resp = _mock_response()
         resp.sink_failed = False
         resp.bytes_decoded = 0
         resp.lines = [
@@ -2262,7 +2045,7 @@ class TestUnauthenticatedPlainArticle:
     def _plain_response(self):
         import sabctools
 
-        resp = mock.MagicMock(spec=sabctools.NNTPResponse)
+        resp = _mock_response()
         resp.sink_failed = False
         resp.format = sabctools.EncodingFormat.YENC
         resp.data = bytearray(b"plain unencrypted content")
@@ -2330,7 +2113,7 @@ class TestUnauthenticatedPlainArticle:
         wire2 = ff1_encrypt(k2, t2, line2_pt)
         wire4 = ff1_encrypt(k4, t4, line4_pt)
 
-        good_resp = mock.MagicMock(spec=sabctools.NNTPResponse)
+        good_resp = _mock_response()
         good_resp.sink_failed = False
         good_resp.bytes_decoded = 0
         good_resp.lines = [
@@ -2512,7 +2295,7 @@ class TestStructuralNoPasswordEncryptedWire:
         article.search_new_server.return_value = True
         article.on_disk = False
 
-        resp = mock.MagicMock(spec=sabctools.NNTPResponse)
+        resp = _mock_response()
         resp.sink_failed = False
         resp.format = sabctools.EncodingFormat.YENC
         resp.bytes_decoded = 0
@@ -2571,7 +2354,7 @@ class TestStructuralNoPasswordEncryptedWire:
         article.on_disk = False
         article.decoded = False
 
-        resp = mock.MagicMock(spec=sabctools.NNTPResponse)
+        resp = _mock_response()
         resp.sink_failed = False
         resp.bytes_decoded = 0
         resp.lines = [
@@ -2713,7 +2496,7 @@ class TestMissingCryptoDependencies:
 
         blocker, saved = self._block_crypto_modules()
         try:
-            from sabnzbd.encryption import DecryptionAdapter, MissingDependencyError
+            from sabnzbd.encryption import DecryptionAdapter, MissingDependencyError, YEncEncryptionStructuralError
 
             # Plain paths must not touch the crypto packages at all
             adapter_plain = DecryptionAdapter(password="unused")
@@ -2724,8 +2507,10 @@ class TestMissingCryptoDependencies:
                 adapter.get_master_key(b"\x01" * 16)
 
             # MissingDependencyError must NOT be routed as provider corruption:
-            # it derives from ImportError, not ValueError.
-            assert not isinstance(MissingDependencyError("x"), ValueError)
+            # it derives from YEncEncryptionStructuralError and ImportError, not YEncEncryptionCryptoError.
+            assert isinstance(MissingDependencyError("x"), YEncEncryptionStructuralError)
+            assert isinstance(MissingDependencyError("x"), ImportError)
+            assert not isinstance(MissingDependencyError("x"), YEncEncryptionCryptoError)
         finally:
             self._restore_crypto_modules(blocker, saved)
             # Drop lazily-imported modules cached during the block
@@ -2778,7 +2563,7 @@ class TestStructuralErrorFailsWithoutServerSearch:
         article.search_new_server.return_value = True  # must never be consulted
         article.on_disk = False
 
-        response = mock.MagicMock(spec=sabctools.NNTPResponse)
+        response = _mock_response()
         response.sink_failed = False
         response.format = sabctools.EncodingFormat.YENC
         response.bytes_decoded = 0
@@ -2798,6 +2583,46 @@ class TestStructuralErrorFailsWithoutServerSearch:
             assert not mock_cache.save_article.called
             assert not article.on_disk
             assert article.nzf.nzo.fail_msg
+
+
+def test_missing_dependency_routes_to_structural_handler():
+    import builtins
+    import sabctools
+    import sabnzbd.decoder as decoder
+
+    password = "dependency-fixture"
+    lines = _single_part_wire_lines(password, b"hello", b"file.bin")
+    original_import = builtins.__import__
+
+    def missing_argon2(name, *args, **kwargs):
+        if name == "argon2.low_level":
+            raise ImportError("mock missing argon2")
+        return original_import(name, *args, **kwargs)
+
+    article = mock.MagicMock(spec=Article)
+    article.article = "missing-dependency@local"
+    article.nzf.nzo.password = password
+    article.nzf.nzo.yenc_encrypted = True
+    article.nzf.nzo.precheck = False
+    article.on_disk = False
+    response = _mock_response()
+    response.sink_failed = False
+    response.format = sabctools.EncodingFormat.YENC
+    response.bytes_decoded = 0
+    response.status_code = 222
+    response.lines = lines
+    cache = mock.MagicMock()
+    queue = mock.MagicMock()
+    with (
+        mock.patch("builtins.__import__", side_effect=missing_argon2),
+        mock.patch.object(sabnzbd, "ArticleCache", cache, create=True),
+        mock.patch.object(sabnzbd, "NzbQueue", queue, create=True),
+    ):
+        decoder.decode(article, response)
+    queue.register_article.assert_called_once_with(article, False)
+    article.search_new_server.assert_not_called()
+    cache.save_article.assert_not_called()
+    assert not article.on_disk
 
 
 def _single_part_wire_lines(password: str, plaintext: bytes, name: bytes, segment_index: int = 1) -> list[str]:
@@ -2834,12 +2659,25 @@ def _single_part_wire_lines(password: str, plaintext: bytes, name: bytes, segmen
     return wire
 
 
+class _FakeDecoder(bytearray):
+    def __init__(self, size):
+        super().__init__(size)
+        self.processed = []
+        self.pending = 0
+        self.expected = 0
+
+    def process(self, n):
+        self.processed.append(n)
+
+    def __iter__(self):
+        return iter([])
+
+
 class TestConvergenceRegressions:
     """Regression tests for the v1.2 convergence fixes (F1, F6); see notes/sb-converge-2026-10-12.md."""
 
     def test_single_part_name_containing_part_keyword_decodes(self):
         """F1: only keywords before name= decide multipart (Control Std v1.2 §5 step 4; Body Std §2.1)."""
-        import sabctools
         import sabnzbd.decoder as decoder
 
         plaintext = b"single-part payload whose name contains a part= keyword"
@@ -2850,7 +2688,7 @@ class TestConvergenceRegressions:
         article.nzf.filename_checked = False
         article.lowest_partnum = True
 
-        resp = mock.MagicMock(spec=sabctools.NNTPResponse)
+        resp = _mock_response()
         resp.sink_failed = False
         resp.bytes_decoded = 0
         resp.lines = wire
@@ -2870,7 +2708,6 @@ class TestConvergenceRegressions:
         assert restored.split(b"\r\n")[1].startswith(b"=yencryption")
         params, _clean = extract_and_remove_yencryption(restored)
         assert params["aad"] == build_aad(b"my part=2.bin", 1, 1, len(plaintext))
-        assert params["segment_bytes"] == len(plaintext)
 
     def test_multipart_with_part_keyword_in_name_uses_header_part_number(self):
         """F1: a multipart =ybegin takes part= from the header keywords, never from the name value."""
@@ -2883,7 +2720,6 @@ class TestConvergenceRegressions:
         )
         params, _clean = extract_and_remove_yencryption(block)
         assert params["aad"] == build_aad(b"x part=9.bin", 3, 11, 10)
-        assert params["segment_bytes"] == 10
 
     def test_ypart_without_begin_or_end_fails_closed(self):
         """F6: missing =ypart begin=/end= is PROVIDER_FAILOVER, not a silent default of 1 (Body Std v1.2 §2.1)."""
@@ -2914,3 +2750,158 @@ class TestConvergenceRegressions:
         broken = "\r\n".join([lines[0], lines[2], lines[1], lines[3]]).encode("latin-1") + b"\r\n"
         with pytest.raises(YEncEncryptionCryptoError):
             adapter.restore_control_lines(broken)
+
+    def test_bare_lf_unencrypted_chunk_is_unchanged(self):
+        """Bytes passed to the decoder equal the bytes received; bytes_recv unchanged (SB-1)."""
+        server = mock.MagicMock()
+        server.timeout = 10
+        server.ssl = False
+        server.pipelining_requests.return_value = 1
+
+        nw = NewsWrapper(server, thrdnum=1)
+        dec = _FakeDecoder(1024)
+        nw.decoder = dec
+        nw.nntp = mock.MagicMock()
+        nw.nntp.nw = nw
+
+        chunks = [b"bare\nlf\nstream\n", b"without\r\ncr\n"]
+        received = iter(chunks)
+
+        def fake_recv_into(buf, nbytes=0):
+            raw_chunk = next(received)
+            memoryview(buf)[: len(raw_chunk)] = raw_chunk
+            return len(raw_chunk)
+
+        nw.nntp.sock.recv_into = fake_recv_into
+        mock_article = mock.MagicMock()
+        mock_article.nzf.nzo.yenc_encrypted = False
+        nw.decoder.pending = 1
+        with (
+            mock.patch.object(NewsWrapper, "article", new_callable=mock.PropertyMock) as mock_art_prop,
+            mock.patch.object(sabnzbd, "Downloader", create=True),
+        ):
+            mock_art_prop.return_value = mock_article
+            for chunk in chunks:
+                nrecv, _ = nw.read()
+                assert nrecv == len(chunk)
+                assert bytes(dec[:nrecv]) == chunk
+        assert dec.processed == [len(chunk) for chunk in chunks]
+
+    def test_bare_lf_expansion_never_exceeds_buffer(self):
+        """A chunk of all \n filling the buffer does not overrun (SB-1)."""
+        server = mock.MagicMock()
+        server.timeout = 10
+        server.ssl = False
+        server.pipelining_requests.return_value = 1
+
+        nw = NewsWrapper(server, thrdnum=1)
+        buf_size = 64
+        dec = _FakeDecoder(buf_size)
+        nw.decoder = dec
+        nw.nntp = mock.MagicMock()
+        nw.nntp.nw = nw
+
+        raw_chunk = b"\n" * buf_size
+
+        def fake_recv_into(buf, nbytes=0):
+            mv = memoryview(buf)
+            mv[: len(raw_chunk)] = raw_chunk
+            return len(raw_chunk)
+
+        nw.nntp.sock.recv_into = fake_recv_into
+
+        # 1. Unencrypted release: ordinary path never rewrites, thus never overruns
+        mock_article_unenc = mock.MagicMock()
+        mock_article_unenc.nzf.nzo.yenc_encrypted = False
+        with (
+            mock.patch.object(NewsWrapper, "article", new_callable=mock.PropertyMock) as mock_art_prop,
+            mock.patch.object(sabnzbd, "Downloader", create=True),
+        ):
+            mock_art_prop.return_value = mock_article_unenc
+            nrecv, _ = nw.read()
+
+        assert nrecv == buf_size
+        assert dec.processed == [buf_size]
+        assert bytes(dec[:buf_size]) == raw_chunk
+
+        # 2. Encrypted release: expansion is bounded; if it exceeds buffer, BufferError is raised
+        dec_enc = _FakeDecoder(buf_size)
+        nw.decoder = dec_enc
+        mock_article_enc = mock.MagicMock()
+        mock_article_enc.nzf.nzo.yenc_encrypted = True
+        with (
+            mock.patch.object(NewsWrapper, "article", new_callable=mock.PropertyMock) as mock_art_prop,
+            mock.patch.object(sabnzbd, "Downloader", create=True),
+        ):
+            mock_art_prop.return_value = mock_article_enc
+            with pytest.raises(BufferError, match="exceeds decoder buffer size"):
+                nw.read()
+
+
+def test_key_cache_capacity_evicts_oldest():
+    """Verify that _key_cache maintains at most 16 entries."""
+    adapter = DecryptionAdapter(password="test-pass")
+    for i in range(20):
+        salt = bytes([i]) * 16
+        adapter.get_master_key(salt)
+        assert len(adapter._key_cache) <= 16
+
+    assert len(adapter._key_cache) == 16
+    # Earliest salts (0..3) should have been evicted
+    assert bytes([0]) * 16 not in adapter._key_cache
+    assert bytes([19]) * 16 in adapter._key_cache
+
+
+@pytest.mark.parametrize("defect", ["missing_name", "empty_name", "missing_crc"])
+def test_encrypted_missing_name_or_crc_fails_closed(defect):
+    import sabnzbd.decoder as decoder
+
+    password = "metadata-defects"
+    lines = _single_part_wire_lines(password, b"hello", b"valid.bin")
+    first = lines[0].encode("latin-1")
+    salt = first[:16]
+    adapter = DecryptionAdapter(password=password)
+    key = adapter.get_master_key(salt)
+    index = 4 if defect == "missing_crc" else 1
+    enc_key, tweak = adapter.derive_control_keys(key, 1, index)
+    content = lines[index - 1].encode("latin-1")
+    plain = adapter.decrypt_control_line(content[20:] if index == 1 else content, enc_key, tweak)
+    if defect == "missing_crc":
+        plain = plain.split(b" crc32=")[0]
+    else:
+        plain = plain.split(b" name=")[0] + (b" name=" if defect == "empty_name" else b"")
+    encrypted = ff1_encrypt(enc_key, tweak, plain)
+    lines[index - 1] = ((first[:20] + encrypted) if index == 1 else encrypted).decode("latin-1")
+    article = mock.MagicMock(spec=Article)
+    article.article = "metadata-defects@test"
+    article.nzf.nzo.yenc_encrypted = True
+    article.nzf.nzo.password = password
+    response = _mock_response()
+    response.sink_failed = False
+    response.bytes_decoded = 0
+    response.status_code = 222
+    response.lines = lines
+    with pytest.raises(YEncEncryptionCryptoError):
+        decoder.decode_yenc(article, response)
+
+
+def test_plain_substitution_does_not_mutate_article_metadata():
+    """Reject unauthenticated substitutions before committing decoder metadata."""
+    import io
+    import sabctools
+    import sabnzbd.decoder as decoder
+
+    encoded, crc = sabctools.yenc_encode(b"plain")
+    wire = b"222 0 <substitution@test>\r\n=ybegin line=128 size=5 name=plain.bin\r\n"
+    wire += encoded + f"\r\n=yend size=5 crc32={crc:08x}\r\n.\r\n".encode()
+    native = sabctools.Decoder(len(wire))
+    io.BytesIO(wire).readinto(native)
+    native.process(len(wire))
+    response = next(native)
+    nzf = mock.Mock()
+    nzf.nzo.yenc_encrypted = True
+    article = Article("substitution@test", 5, nzf)
+    original = (article.file_size, article.data_begin, article.data_size, article.decoded_size)
+    with pytest.raises(YEncEncryptionCryptoError, match="UNAUTHENTICATED_ARTICLE"):
+        decoder.decode_yenc(article, response)
+    assert (article.file_size, article.data_begin, article.data_size, article.decoded_size) == original

@@ -105,7 +105,7 @@ class Article(TryList):
     """Representation of one article"""
 
     # Pre-define attributes to save memory
-    __slots__ = (*ArticleSaver, "fetcher", "fetcher_priority", "tries", "lock", "_bare_lf")
+    __slots__ = (*ArticleSaver, "fetcher", "fetcher_priority", "tries", "lock")
 
     def __init__(self, article, article_bytes, nzf):
         super().__init__()
@@ -117,7 +117,6 @@ class Article(TryList):
         self.fetcher_priority: int = 0
         self.tries: int = 0  # Try count
         self.decoded: bool = False
-        self._bare_lf: bool = False  # Response arrived with bare-LF line endings (transport seam)
         self.file_size: Optional[int] = None
         self.data_begin: Optional[int] = None
         self.data_size: Optional[int] = None

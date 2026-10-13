@@ -116,17 +116,7 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
         if sabnzbd.LOG_ALL:
             logging.debug("Decoding %s", art_id)
 
-        # Guard encrypted jobs before response-format dispatch:
-        # Unencrypted plaintext substitutions (UU or unencrypted yEnc) must be rejected
-        # before format-specific decoders, salvage paths, or cache commit. A real
-        # sabctools NNTPResponse always has an int bytes_decoded.
         if _is_yenc_encrypted(article):
-            if decoder.format is sabctools.EncodingFormat.UU or (
-                isinstance(decoder.bytes_decoded, int) and decoder.bytes_decoded
-            ):
-                raise YEncEncryptionCryptoError(
-                    f"UNAUTHENTICATED_ARTICLE: unencrypted article {art_id} in a yEnc-encrypted release"
-                )
             decoded_data = decode_yenc(article, decoder)
         elif decoder.format is sabctools.EncodingFormat.UU:
             decoded_data = decode_uu(article, decoder)
@@ -146,12 +136,6 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
         return
 
     except BadData as error:
-        # Zero-output guarantee: encrypted articles must never salvage corrupt data
-        if _is_yenc_encrypted(article):
-            logging.info("Corrupt data in encrypted article %s, trying next server", art_id)
-            search_new_server(article)
-            return
-
         # Continue to the next one if we found new server
         if search_new_server(article):
             return
@@ -170,7 +154,7 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
 
     except YEncEncryptionStructuralError as error:
         # Structural metadata failure (missing password, unsupported mode): fail the
-        # article without trying other servers (job-terminal METADATA_VALIDATION tier).
+        # article without trying other servers (METADATA_VALIDATION tier).
         logging.error(T("Structural yEnc-encryption failure in %s: %s"), art_id, error)
         nzo.fail_msg = T("Structural yEnc-encryption failure: missing or invalid metadata")
         nzo.set_unpack_info("Download", nzo.fail_msg)
@@ -299,13 +283,22 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
     # boundary sabctools does not report, and the body must never be found by trial
     # decryption (Body Standard v1.2 section 9). Any other status fails closed as
     # provider failover.
-    if _is_yenc_encrypted(article) and isinstance(response.status_code, int) and response.status_code != 222:
+    if _is_yenc_encrypted(article) and response.status_code != 222:
         raise YEncEncryptionCryptoError(
-            f"Encrypted article {getattr(article, 'article', '')} answered with status {response.status_code}, not BODY"
+            f"Encrypted article {article.article} answered with status {response.status_code}, not BODY"
+        )
+
+    # Body Standard v1.2 section 9: reject substitutions before format dispatch,
+    # metadata mutation, salvage, or caching. Only encrypted wire lines may proceed.
+    if _is_yenc_encrypted(article) and (
+        response.format is sabctools.EncodingFormat.UU or response.bytes_decoded or not response.lines
+    ):
+        raise YEncEncryptionCryptoError(
+            f"UNAUTHENTICATED_ARTICLE: unencrypted article {article.article} in a yEnc-encrypted release"
         )
 
     # Encrypted wire response: sabctools couldn't decode because control lines were FF1-encrypted
-    if response.bytes_decoded == 0 and getattr(response, "lines", None) and _is_yenc_encrypted(article):
+    if _is_yenc_encrypted(article):
         lines = [line.encode("latin-1") if isinstance(line, str) else line for line in response.lines]
 
         password = getattr(article.nzf.nzo, "password", None)
@@ -320,9 +313,9 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
         # single '.' is the article terminator (already consumed by sabctools here).
         lines = [line[1:] if line.startswith(b"..") else line for line in lines]
 
-        # Preserve original line endings: use bare LF if article was received with LF
-        wire_ending = b"\n" if getattr(article, "_bare_lf", False) else b"\r\n"
-        raw_wire = wire_ending.join(lines) + wire_ending
+        # NewsWrapper already normalizes encrypted transport framing for sabctools.
+        # NNTPResponse.lines has no terminators; control tweaks depend on line indices.
+        raw_wire = b"\r\n".join(lines) + b"\r\n"
 
         restored_block, salt_line1, seg_idx_line1 = adapter.restore_control_lines(raw_wire)
         yenc_params, clean_yenc = extract_and_remove_yencryption(restored_block)
@@ -360,7 +353,7 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
             raise YEncEncryptionCryptoError("Truncated or malformed yEnc block in encrypted article")
 
         if sub_resp.crc is None:
-            raise YEncEncryptionCryptoError(f"Wire CRC error in encrypted article {getattr(article, 'article', '')}")
+            raise YEncEncryptionCryptoError(f"Wire CRC error in encrypted article {article.article}")
 
         plaintext = adapter.decrypt_body(
             ciphertext=bytes(sub_resp.data or b""),
@@ -396,15 +389,6 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
 
     # Assume it is yenc
     nzf.type = "yenc"
-
-    # Zero-Output Rule: a release declared yEnc-encrypted must never accept a plain
-    # (never-authenticated) article. A substituted article is provider corruption -
-    # retriable tier - so this raises YEncEncryptionCryptoError, which decode() routes
-    # to search_new_server. Never a structural error.
-    if _is_yenc_encrypted(article):
-        raise YEncEncryptionCryptoError(
-            f"UNAUTHENTICATED_ARTICLE: plain yEnc article {getattr(article, 'article', '')} in a yEnc-encrypted release"
-        )
 
     # Only set the name if it was found and not obfuscated. Streamed articles never
     # reach here: a sink is only handed out once the filename has been checked, exactly

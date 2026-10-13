@@ -35,10 +35,29 @@ from typing import Any, Optional
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 
+class YEncEncryptionStructuralError(ValueError):
+    """Structural yEnc-encryption metadata failure (missing/empty password, unsupported mode).
+
+    Per the tier separation in the yEnc encryption standards: structural failures abort the
+    article without trying another server - no plaintext or ciphertext is released.
+    Inherits from ValueError so existing ``isinstance(e, ValueError)`` handlers still catch it,
+    but decoder.py catches this class FIRST to fail this article without trying other servers instead of using the
+    retryable provider-failover tier (METADATA_VALIDATION semantics).
+    """
+
+
+class YEncEncryptionCryptoError(ValueError):
+    """Retryable yEnc-encryption crypto failure (provider corruption tier).
+
+    Indicates corrupted control lines, bad salt, or authentication tag mismatch on the wire.
+    The article is retried against other configured servers (PROVIDER_FAILOVER semantics).
+    """
+
+
 # Minimal non-empty dependency diagnostics: raised structurally when an encrypted
 # job needs a package that is not installed (METADATA_VALIDATION tier - the job
 # cannot proceed on any server, so no alternate-provider query is made).
-class MissingDependencyError(ImportError):
+class MissingDependencyError(YEncEncryptionStructuralError, ImportError):
     pass
 
 
@@ -67,29 +86,6 @@ def _lazy_nacl_bindings():
 
 
 BOOTSTRAP_PREFIX_LEN = 20
-
-
-class YEncEncryptionStructuralError(ValueError):
-    """Structural yEnc-encryption metadata failure (missing/empty password, unsupported mode).
-
-    Per the tier separation in the yEnc encryption standards: structural failures abort the
-    job and are NEVER retried against another server - no plaintext or ciphertext is released.
-    Inherits from ValueError so existing ``isinstance(e, ValueError)`` handlers still catch it,
-    but decoder.py catches this class FIRST to route it to the job-terminal path instead of the
-    retryable provider-failover tier (METADATA_VALIDATION semantics).
-    """
-
-
-class YEncEncryptionCryptoError(ValueError):
-    """Retryable yEnc-encryption crypto failure (provider corruption tier).
-
-    Wire-level crypto failures: Poly1305 authentication failure, FF1 control-line
-    decryption failure, malformed or mismatched encrypted metadata, corrupt bootstrap
-    bytes. decoder.py catches this class specifically for the provider-failover tier
-    (PROVIDER_FAILOVER semantics); a plain ValueError is a programming error and is
-    never retried as provider corruption. Inherits from ValueError so existing
-    ``isinstance(e, ValueError)`` handlers still catch it.
-    """
 
 
 def _split_ending(line: bytes) -> tuple[bytes, bytes]:
@@ -287,7 +283,6 @@ def parse_yencryption_line(line: str | bytes) -> Optional[dict[str, Any]]:
         return None
 
     return {
-        "cipher": "XChaCha20-Poly1305",
         "salt": salt,
         "segment_index": segment_index,
         "tag": tag,
@@ -363,23 +358,30 @@ def extract_and_remove_yencryption(yenc_block: bytes) -> tuple[dict[str, Any], b
         raise YEncEncryptionCryptoError("Line 1 does not start with =ybegin")
 
     header_tokens, name_bytes = _ybegin_header(line1)
-    is_multipart = _is_multipart_ybegin(header_tokens)
+    pt1_has_part = _is_multipart_ybegin(header_tokens)
 
-    if is_multipart:
+    line2 = raw_lines[1]
+    if line2.startswith(b"=ypart"):
+        is_multipart = True
         if len(raw_lines) < 3:
             raise YEncEncryptionCryptoError(f"Multipart article too short: {len(raw_lines)} line(s)")
-        line2 = raw_lines[1]
-        if not line2.startswith(b"=ypart"):
-            raise YEncEncryptionCryptoError("Line 2 in multipart article does not start with =ypart")
+        if not pt1_has_part:
+            raise YEncEncryptionCryptoError(
+                "PROVIDER_FAILOVER: line 2 is not =yencryption at its fixed position (INVALID_MULTIPART_FRAMING: multipart line 2 is =ypart but line 1 has no part= parameter)"
+            )
         line3 = raw_lines[2]
         if not line3.startswith(b"=yencryption"):
             raise YEncEncryptionCryptoError("Line 3 in multipart article does not start with =yencryption")
         yenc_idx = 2
-    else:
-        line2 = raw_lines[1]
-        if not line2.startswith(b"=yencryption"):
-            raise YEncEncryptionCryptoError("Line 2 in single-part article does not start with =yencryption")
+    elif line2.startswith(b"=yencryption"):
+        is_multipart = False
+        if pt1_has_part:
+            raise YEncEncryptionCryptoError(
+                "MISPLACED_ENCRYPTION_HEADER: line 2 is =yencryption (does not start with =ypart) but line 1 has part= parameter"
+            )
         yenc_idx = 1
+    else:
+        raise YEncEncryptionCryptoError("Line 2 does not start with =yencryption or =ypart")
 
     for idx, r_line in enumerate(raw_lines):
         if idx != yenc_idx and r_line.startswith(b"=yencryption"):
@@ -413,8 +415,12 @@ def extract_and_remove_yencryption(yenc_block: bytes) -> tuple[dict[str, Any], b
         part_begin = 1
         segment_bytes = _required_int(ybegin_values, b"size", "=ybegin")
 
+    if part_begin >= (1 << 32) or segment_bytes >= (1 << 32):
+        raise YEncEncryptionCryptoError("PROVIDER_FAILOVER: SIZE_OVERFLOW: size or offset exceeds 4 GiB (2^32 bytes)")
+    if b"size" in ybegin_values and _required_int(ybegin_values, b"size", "=ybegin") >= (1 << 32):
+        raise YEncEncryptionCryptoError("PROVIDER_FAILOVER: SIZE_OVERFLOW: size exceeds 4 GiB (2^32 bytes)")
+
     params["aad"] = build_aad(name_bytes, part_number, part_begin, segment_bytes)
-    params["segment_bytes"] = segment_bytes
 
     clean_lines = raw_lines[:yenc_idx] + raw_lines[yenc_idx + 1 :]
     return params, b"".join(clean_lines)
@@ -538,6 +544,8 @@ class DecryptionAdapter:
                 type=_lazy_argon2().Type.ID,
                 version=0x13,
             )
+            if len(self._key_cache) >= 16:
+                self._key_cache.pop(next(iter(self._key_cache)))
             self._key_cache[salt] = key
             return key
 
@@ -559,7 +567,7 @@ class DecryptionAdapter:
         tag: bytes,
         salt: bytes,
         segment_index: int,
-        aad: bytes = b"",
+        aad: bytes,
     ) -> bytes:
         """Authenticate and decrypt ciphertext; raises YEncEncryptionCryptoError on auth failure without releasing plaintext.
 
@@ -629,35 +637,41 @@ class DecryptionAdapter:
         if not pt1.startswith(b"=ybegin"):
             raise YEncEncryptionCryptoError("Control line decrypt failure: line 1 does not start with =ybegin")
 
-        if len(raw_lines) < 2:
+        if len(raw_lines) < 3:
             raise YEncEncryptionCryptoError(
-                f"Article block too short for encrypted yEnc: {len(raw_lines)} line(s) (minimum 2)"
+                f"Article block too short for encrypted yEnc: {len(raw_lines)} line(s) (minimum 3)"
             )
 
-        is_multipart = _is_multipart_ybegin(_ybegin_header(pt1)[0])
+        line2_content, line2_ending = _split_ending(raw_lines[1])
+        enc_key2, tweak2 = self.derive_control_keys(master_key, segment_index, 2)
+        pt2 = self.decrypt_control_line(line2_content, enc_key2, tweak2)
+
+        pt1_has_part = _is_multipart_ybegin(_ybegin_header(pt1)[0])
         restored_lines: list[bytes] = [pt1 + line1_ending]
 
-        if is_multipart:
-            if len(raw_lines) < 3:
+        if pt2.startswith(b"=ypart"):
+            if len(raw_lines) < 4:
                 raise YEncEncryptionCryptoError(
-                    f"Multipart article too short for encrypted yEnc: {len(raw_lines)} line(s) (minimum 3)"
+                    f"Multipart article too short for encrypted yEnc: {len(raw_lines)} line(s) (minimum 4)"
                 )
-            part_content, part_ending = _split_ending(raw_lines[1])
-            enc_key, tweak = self.derive_control_keys(master_key, segment_index, 2)
-            pt2 = self.decrypt_control_line(part_content, enc_key, tweak)
-            if not pt2.startswith(b"=ypart"):
-                raise YEncEncryptionCryptoError("Multipart line 2 does not start with =ypart")
-            restored_lines.append(pt2 + part_ending)
-
+            if not pt1_has_part:
+                raise YEncEncryptionCryptoError(
+                    "INVALID_MULTIPART_FRAMING: multipart line 2 is =ypart (not =yencryption) but line 1 has no part= parameter"
+                )
+            restored_lines.append(pt2 + line2_ending)
+            restored_lines.append(self._restore_yencryption_line(master_key, segment_index, raw_lines[2], 3))
+            first_data_line_index = 4
+        elif pt2.startswith(b"=yencryption"):
+            if pt1_has_part:
+                raise YEncEncryptionCryptoError(
+                    "MISPLACED_ENCRYPTION_HEADER: single-part line 2 is =yencryption (Multipart line 2 does not start with =ypart) but line 1 has part= parameter"
+                )
+            restored_lines.append(pt2 + line2_ending)
             first_data_line_index = 3
-            if len(raw_lines) > 3:
-                restored_lines.append(self._restore_yencryption_line(master_key, segment_index, raw_lines[2], 3))
-                first_data_line_index = 4
         else:
-            first_data_line_index = 2
-            if len(raw_lines) > 2:
-                restored_lines.append(self._restore_yencryption_line(master_key, segment_index, raw_lines[1], 2))
-                first_data_line_index = 3
+            raise YEncEncryptionCryptoError(
+                "Control line decrypt failure: line 2 does not start with =ypart or =yencryption"
+            )
 
         # Data lines (D through N-1) pass through untouched, byte for byte, terminators included
         for idx in range(first_data_line_index - 1, len(raw_lines) - 1):

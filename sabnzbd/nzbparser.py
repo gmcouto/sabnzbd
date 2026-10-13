@@ -360,7 +360,7 @@ def process_single_nzb(
         nzo_ids.append(err.nzo.nzo_id)
     except YEncEncryptionStructuralError as err:
         # Structural yEnc-encryption metadata failure (e.g. encrypted NZB without password):
-        # job-terminal, never retried against any server (zero NNTP contact)
+        # rejects ingestion before contacting any NNTP server
         logging.error(T("Structural yEnc-encryption failure in %s: %s"), filename, err)
         result = AddNzbFileResult.ERROR
     except Exception:
@@ -538,8 +538,6 @@ def nzbfile_parser(full_nzb_path: str, nzo):
                 )
 
         raw_meta_passwords = nzo.meta.get("password") or []
-        if isinstance(raw_meta_passwords, str):
-            raw_meta_passwords = [raw_meta_passwords]
         meta_pws = [p for p in raw_meta_passwords if isinstance(p, str) and p.strip()]
 
         attr_pw = getattr(nzo, "password", None)

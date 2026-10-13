@@ -48,7 +48,7 @@ python3 tools/make_mo.py
 
 Our many other command line options are explained in depth [here](https://sabnzbd.org/wiki/advanced/command-line-parameters).
 
-## yEnc Header and Body Decryption
+## yEnc Body Encryption and Control Line Encryption
 
 SABnzbd can download releases protected by the experimental yEnc body and control-line
 encryption (XChaCha20-Poly1305 with FF1), conforming to the v1.2 draft standards. Encrypted

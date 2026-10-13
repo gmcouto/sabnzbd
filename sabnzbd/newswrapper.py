@@ -381,31 +381,36 @@ class NewsWrapper:
 
         # Line-ending handling at native transport seam (RFC 3977 §3.1.1):
         # sabctools requires CRLF to delimit NNTP response lines; when a server emits
-        # bare LF, track the original terminator on the in-flight article and adapt the
-        # wire buffer so native transport completes without fabricating CRLF downstream.
+        # bare LF, adapt the
+        # wire buffer so the native transport parser can complete the response.
         # A CRLF can also be split across TCP chunks: a chunk that begins with a lone
         # '\n' is the second half of a CRLF when the previous chunk ended with '\r',
         # and must be left byte-exact or the article terminator is corrupted.
-        mv = memoryview(self.decoder)
-        raw_chunk = bytes(mv[:bytes_recv])
-        split_crlf = raw_chunk.startswith(b"\n") and self._prev_chunk_ended_with_cr
-        # '\r' as the final byte is preserved by the bare-LF rewrite below, so tracking
-        # it from the raw chunk stays valid across normalized and unnormalized chunks.
-        self._prev_chunk_ended_with_cr = raw_chunk.endswith(b"\r")
-        # A '\n' is a bare LF only when not preceded by '\r', either inside this chunk
-        # or by the previous chunk's trailing '\r' for a CRLF split across chunks.
-        detect_chunk = (b"\r" + raw_chunk) if split_crlf else raw_chunk
-        if b"\n" in detect_chunk.replace(b"\r\n", b""):
-            article = self.article
-            if article:
-                article._bare_lf = True
-            norm_chunk = detect_chunk.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
-            if split_crlf:
-                # The leading '\n' already pairs with the previous chunk's '\r' in the
-                # buffer; drop the synthetic '\r' so it stays a single CRLF.
-                norm_chunk = norm_chunk[1:]
-            mv[: len(norm_chunk)] = norm_chunk
-            bytes_recv = len(norm_chunk)
+        if (
+            self.article
+            and getattr(self.article, "nzf", None)
+            and getattr(self.article.nzf, "nzo", None)
+            and self.article.nzf.nzo.yenc_encrypted
+        ):
+            mv = memoryview(self.decoder)
+            raw_chunk = bytes(mv[:bytes_recv])
+            split_crlf = raw_chunk.startswith(b"\n") and self._prev_chunk_ended_with_cr
+            # '\r' as the final byte is preserved by the bare-LF rewrite below, so tracking
+            # it from the raw chunk stays valid across normalized and unnormalized chunks.
+            self._prev_chunk_ended_with_cr = raw_chunk.endswith(b"\r")
+            # A '\n' is a bare LF only when not preceded by '\r', either inside this chunk
+            # or by the previous chunk's trailing '\r' for a CRLF split across chunks.
+            detect_chunk = (b"\r" + raw_chunk) if split_crlf else raw_chunk
+            if b"\n" in detect_chunk.replace(b"\r\n", b""):
+                norm_chunk = detect_chunk.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+                if split_crlf:
+                    # The leading '\n' already pairs with the previous chunk's '\r' in the
+                    # buffer; drop the synthetic '\r' so it stays a single CRLF.
+                    norm_chunk = norm_chunk[1:]
+                if len(norm_chunk) > len(mv):
+                    raise BufferError("Normalized chunk exceeds decoder buffer size")
+                mv[: len(norm_chunk)] = norm_chunk
+                bytes_recv = len(norm_chunk)
 
         self.decoder.process(bytes_recv)
         if self.decoder:

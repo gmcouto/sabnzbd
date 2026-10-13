@@ -570,7 +570,7 @@ class Downloader(Thread):
         sabnzbd.BPSMeter.register_server_article_tried(article.fetcher.id)
 
         # Handle broken articles directly
-        has_lines = bool(response and getattr(response, "lines", None))
+        has_lines = bool(response and response.lines)
         is_encrypted = bool(article.nzf.nzo.yenc_encrypted)
 
         if not response or (

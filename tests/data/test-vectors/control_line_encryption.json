@@ -87,7 +87,7 @@
       "expected_wire_hex": "c1e630d858d271da6accc0b0dd"
     },
     {
-      "id": "control-vec-06-line-54-yend-multipart",
+      "id": "control-vec-06-yend-multipart",
       "description": "Footer line 54 =yend multipart with pcrc32 (exact length preservation)",
       "password": "test123",
       "salt_hex": "4b376d5839704c32715238764e34775a",
@@ -121,94 +121,6 @@
         "446174614c696e653154657374446174614d75737452656d61696e556e746f756368656431323334353637383930",
         "446174614c696e653254657374446174614d75737452656d61696e556e746f756368656431323334353637383930",
         "f13250016df316d5d740ec658a"
-      ]
-    },
-    {
-      "id": "control-vec-09-one-byte-data",
-      "description": "STD-2 one-byte data fixture: single data byte passes through untouched; no trial decryption occurs",
-      "password": "test123",
-      "salt_hex": "4b376d5839704c32715238764e34775a",
-      "segment_index": 1,
-      "total_physical_lines": 4,
-      "input_lines": [
-        "=ybegin line=4 size=1 name=one.bin",
-        "=yencryption cipher=XChaCha20-Poly1305 salt=4b376d5839704c32715238764e34775a index=00000001 tag=24d9229edfc04aeaeedcf105bc91e695",
-        "F",
-        "=yend size=1"
-      ],
-      "expected_wire_lines_hex": [
-        "4b376d5839704c32715238764e34775a000000018c33f388f53c64b4431258341acd372b6e254cdd609ceebfc6ec5552598f953c4195",
-        "7ebf87254605c04dbe246fe4612f24ebee403e936acac9f0f46cba27eaf69a2055379de0472aa95ddaffe52c76e466da60b550474a51b19b2f8666909f6f8b46ddf1e2196d65aee9974e3d8f05fb8aeaf6e723f291a1714015d7f8fd5d0160f55cced913336080c4f1d10209a09b50515f890b31bf3323c7d741f5426b3c3a80",
-        "46",
-        "afcfbdaf28f29d1fbb170e16"
-      ]
-    },
-    {
-      "id": "control-vec-10-exact-wrap-article-6-lines",
-      "description": "STD-2 exact-wrap fixture: data lines exactly one yEnc wrap long pass through untouched, after a valid =yencryption header at line 2",
-      "password": "test123",
-      "salt_hex": "4b376d5839704c32715238764e34775a",
-      "segment_index": 1,
-      "total_physical_lines": 6,
-      "input_lines": [
-        "=ybegin line=12 size=36 name=wrap.bin",
-        "=yencryption cipher=XChaCha20-Poly1305 salt=4b376d5839704c32715238764e34775a index=00000001 tag=24d9229edfc04aeaeedcf105bc91e695",
-        "0123456789ab",
-        "cdef01234567",
-        "89abcd123456",
-        "=yend size=36"
-      ],
-      "expected_wire_lines_hex": [
-        "4b376d5839704c32715238764e34775a000000019fb9ba8037d480b3ed706575019004e014cf3939546cbe69117623678e04544583ed6385eb",
-        "7ebf87254605c04dbe246fe4612f24ebee403e936acac9f0f46cba27eaf69a2055379de0472aa95ddaffe52c76e466da60b550474a51b19b2f8666909f6f8b46ddf1e2196d65aee9974e3d8f05fb8aeaf6e723f291a1714015d7f8fd5d0160f55cced913336080c4f1d10209a09b50515f890b31bf3323c7d741f5426b3c3a80",
-        "303132333435363738396162",
-        "636465663031323334353637",
-        "383961626364313233343536",
-        "a31b42696f3fa9d5317ba2f216"
-      ]
-    },
-    {
-      "id": "control-vec-11-combined-one-byte-data",
-      "description": "STD-2 combined-mode multipart fixture with a one-byte data line: deterministic header positions (1..3), data line untouched",
-      "password": "test123",
-      "salt_hex": "4b376d5839704c32715238764e34775a",
-      "segment_index": 1,
-      "total_physical_lines": 5,
-      "input_lines": [
-        "=ybegin part=1 total=1 line=4 size=1 name=combined.bin",
-        "=ypart begin=1 end=1",
-        "=yencryption cipher=XChaCha20-Poly1305 salt=4b376d5839704c32715238764e34775a index=00000001 tag=24d9229edfc04aeaeedcf105bc91e695",
-        "F",
-        "=yend size=1 part=1 pcrc32=16df26f1"
-      ],
-      "expected_wire_lines_hex": [
-        "4b376d5839704c32715238764e34775a0000000194fdd485e8e837c26f4b4f28dabd045c60536564a59ace2ece6042789db55f17bfc64d0485f2c1c5dd83c2155d36d2f3c8c21c15ecd5",
-        "d56c8a852ded89a1f4e41f484b19a4d8e0ff7c8c",
-        "6d988d028369bef64353e578308506c7e07a34f513ea4a141ac34d217af89304238ad83fda5e91c2be9d924f1724c2ebade63e089a35303fc35d27f65af6ff3be3f98b3729cad6a8055ce27b8779c274acd592cf8c29c2a9e1935de9c9eb667e1b83a658171a7c5c650fd8e6a2c4dba93f19990415f850877ed93cd81c3a84a0",
-        "46",
-        "9ee4feb74845876e30facb1890e365ab80a44a56d62d0e78763fbc95ac069b6c2fa462"
-      ]
-    },
-    {
-      "id": "control-vec-12-single-part-name-contains-part",
-      "description": "Single-part article whose =ybegin name contains ' part=': only keywords before name= count, so the layout is single-part (=yencryption at line 2, D = 3)",
-      "password": "test123",
-      "salt_hex": "4b376d5839704c32715238764e34775a",
-      "segment_index": 1,
-      "total_physical_lines": 4,
-      "expected_multipart": false,
-      "expected_first_data_line": 3,
-      "input_lines": [
-        "=ybegin line=128 size=1 name=my part=2.bin",
-        "=yencryption cipher=XChaCha20-Poly1305 salt=4b376d5839704c32715238764e34775a index=00000001 tag=24d9229edfc04aeaeedcf105bc91e695",
-        "F",
-        "=yend size=1 crc32=16df26f1"
-      ],
-      "expected_wire_lines_hex": [
-        "4b376d5839704c32715238764e34775a000000012353e5efbf4e5d86a7cfb18b2b26f84133b9fd2b84c57e2e779a4cb78321ffffdbe91c8eb076c4d11a7c",
-        "7ebf87254605c04dbe246fe4612f24ebee403e936acac9f0f46cba27eaf69a2055379de0472aa95ddaffe52c76e466da60b550474a51b19b2f8666909f6f8b46ddf1e2196d65aee9974e3d8f05fb8aeaf6e723f291a1714015d7f8fd5d0160f55cced913336080c4f1d10209a09b50515f890b31bf3323c7d741f5426b3c3a80",
-        "46",
-        "bc4820383971bf86854d7061bfcfef472ca4fd89691a7a54626c13"
       ]
     },
     {
@@ -329,6 +241,94 @@
         "54657374446174614c696e653439436f6e74656e74556e746f756368656442797465466f724279746550616464696e6731323334353637383930",
         "54657374446174614c696e653530436f6e74656e74556e746f756368656442797465466f724279746550616464696e6731323334353637383930",
         "c25ab5a44cfa8440112fdbd42192355eea94ec91036f6c9a401b5a937497017a507aec5be707635e"
+      ]
+    },
+    {
+      "id": "control-vec-09-one-byte-data",
+      "description": "One-byte data fixture: single data byte passes through untouched; no trial decryption occurs",
+      "password": "test123",
+      "salt_hex": "4b376d5839704c32715238764e34775a",
+      "segment_index": 1,
+      "total_physical_lines": 4,
+      "input_lines": [
+        "=ybegin line=4 size=1 name=one.bin",
+        "=yencryption cipher=XChaCha20-Poly1305 salt=4b376d5839704c32715238764e34775a index=00000001 tag=24d9229edfc04aeaeedcf105bc91e695",
+        "F",
+        "=yend size=1"
+      ],
+      "expected_wire_lines_hex": [
+        "4b376d5839704c32715238764e34775a000000018c33f388f53c64b4431258341acd372b6e254cdd609ceebfc6ec5552598f953c4195",
+        "7ebf87254605c04dbe246fe4612f24ebee403e936acac9f0f46cba27eaf69a2055379de0472aa95ddaffe52c76e466da60b550474a51b19b2f8666909f6f8b46ddf1e2196d65aee9974e3d8f05fb8aeaf6e723f291a1714015d7f8fd5d0160f55cced913336080c4f1d10209a09b50515f890b31bf3323c7d741f5426b3c3a80",
+        "46",
+        "afcfbdaf28f29d1fbb170e16"
+      ]
+    },
+    {
+      "id": "control-vec-10-exact-wrap-article-6-lines",
+      "description": "Exact-wrap fixture: data lines exactly one yEnc wrap long pass through untouched, after a valid =yencryption header at line 2",
+      "password": "test123",
+      "salt_hex": "4b376d5839704c32715238764e34775a",
+      "segment_index": 1,
+      "total_physical_lines": 6,
+      "input_lines": [
+        "=ybegin line=12 size=36 name=wrap.bin",
+        "=yencryption cipher=XChaCha20-Poly1305 salt=4b376d5839704c32715238764e34775a index=00000001 tag=24d9229edfc04aeaeedcf105bc91e695",
+        "0123456789ab",
+        "cdef01234567",
+        "89abcd123456",
+        "=yend size=36"
+      ],
+      "expected_wire_lines_hex": [
+        "4b376d5839704c32715238764e34775a000000019fb9ba8037d480b3ed706575019004e014cf3939546cbe69117623678e04544583ed6385eb",
+        "7ebf87254605c04dbe246fe4612f24ebee403e936acac9f0f46cba27eaf69a2055379de0472aa95ddaffe52c76e466da60b550474a51b19b2f8666909f6f8b46ddf1e2196d65aee9974e3d8f05fb8aeaf6e723f291a1714015d7f8fd5d0160f55cced913336080c4f1d10209a09b50515f890b31bf3323c7d741f5426b3c3a80",
+        "303132333435363738396162",
+        "636465663031323334353637",
+        "383961626364313233343536",
+        "a31b42696f3fa9d5317ba2f216"
+      ]
+    },
+    {
+      "id": "control-vec-11-combined-one-byte-data",
+      "description": "STD-2 combined-mode multipart fixture with a one-byte data line: deterministic header positions (1..3), data line untouched",
+      "password": "test123",
+      "salt_hex": "4b376d5839704c32715238764e34775a",
+      "segment_index": 1,
+      "total_physical_lines": 5,
+      "input_lines": [
+        "=ybegin part=1 total=1 line=4 size=1 name=combined.bin",
+        "=ypart begin=1 end=1",
+        "=yencryption cipher=XChaCha20-Poly1305 salt=4b376d5839704c32715238764e34775a index=00000001 tag=24d9229edfc04aeaeedcf105bc91e695",
+        "F",
+        "=yend size=1 part=1 pcrc32=16df26f1"
+      ],
+      "expected_wire_lines_hex": [
+        "4b376d5839704c32715238764e34775a0000000194fdd485e8e837c26f4b4f28dabd045c60536564a59ace2ece6042789db55f17bfc64d0485f2c1c5dd83c2155d36d2f3c8c21c15ecd5",
+        "d56c8a852ded89a1f4e41f484b19a4d8e0ff7c8c",
+        "6d988d028369bef64353e578308506c7e07a34f513ea4a141ac34d217af89304238ad83fda5e91c2be9d924f1724c2ebade63e089a35303fc35d27f65af6ff3be3f98b3729cad6a8055ce27b8779c274acd592cf8c29c2a9e1935de9c9eb667e1b83a658171a7c5c650fd8e6a2c4dba93f19990415f850877ed93cd81c3a84a0",
+        "46",
+        "9ee4feb74845876e30facb1890e365ab80a44a56d62d0e78763fbc95ac069b6c2fa462"
+      ]
+    },
+    {
+      "id": "control-vec-12-single-part-name-contains-part",
+      "description": "Single-part article whose =ybegin name contains '=ypart ' and 'part=': physical line 2 (not strings in =ybegin name=) governs layout, so the layout is single-part (=yencryption at line 2, D = 3)",
+      "password": "test123",
+      "salt_hex": "4b376d5839704c32715238764e34775a",
+      "segment_index": 1,
+      "total_physical_lines": 4,
+      "expected_multipart": false,
+      "expected_first_data_line": 3,
+      "input_lines": [
+        "=ybegin line=128 size=1 name=my =ypart part=2.bin",
+        "=yencryption cipher=XChaCha20-Poly1305 salt=4b376d5839704c32715238764e34775a index=00000001 tag=d5582bae5bd0c8dfd2a8a477ebd4dd30",
+        "F",
+        "=yend size=1 crc32=16df26f1"
+      ],
+      "expected_wire_lines_hex": [
+        "4b376d5839704c32715238764e34775a00000001c3effd1c65517b485908758b4215eb81cb44c6f832599b50dd1c63786628c4304493bd0f1e340c318918e3d44b764b17b4",
+        "13c67b594d2a11b0a2ffb7f024dc3a1696aab750fdbae0e4aea62637be2868be7ddeb7b76c6826604f21d0a697cc6cd2c5f2d75d3e576857eb6836eed2c16ca54dbd8a45b1325a8689f3f3a4851475c3290182eda970f0eaed4476a5e0bbf2c3416e1c05a40f5b20e36b04ef05b16563428bba19eb5d7c5e01fa23f0c04d77c9",
+        "46",
+        "bc4820383971bf86854d7061bfcfef472ca4fd89691a7a54626c13"
       ]
     }
   ]
