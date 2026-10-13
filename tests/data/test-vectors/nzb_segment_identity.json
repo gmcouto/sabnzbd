@@ -1,7 +1,6 @@
 {
   "schema_version": "1.0",
   "standard": "yEnc Body & Control Lines Encryption Standards v1.2",
-  "requirement": "VEC-06",
   "vectors": [
     {
       "id": "nzb-valid-01-basic-sequential",

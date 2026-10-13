@@ -1,7 +1,6 @@
 {
   "schema_version": "1.0",
   "standard": "yEnc Body Encryption Standard v1.2",
-  "requirement": "VEC-03",
   "cipher": "XChaCha20-Poly1305",
   "aad_layout": "yenc-body aad(13) || uint32_be(partNumber) || uint32_be(partBegin) || uint64_be(segmentBytes) || uint32_be(nameLength) || nameBytes (Body Standard Section 2.1)",
   "vectors": [
@@ -183,7 +182,7 @@
     },
     {
       "id": "body-vec-09-one-byte-payload",
-      "description": "One-byte plaintext payload (STD-2 one-byte data fixture)",
+      "description": "One-byte plaintext payload (one-byte data fixture)",
       "password": "test123",
       "salt_hex": "1a2b3c4d5e6f7890abcdef1234567890",
       "segment_index": 1,

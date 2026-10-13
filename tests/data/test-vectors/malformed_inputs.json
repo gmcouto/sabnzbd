@@ -1,7 +1,6 @@
 {
   "schema_version": "1.0",
   "standard": "yEnc Body & Control Lines Encryption Standards v1.2",
-  "requirement": "VEC-05",
   "vectors": [
     {
       "id": "malformed-header-01-bad-cipher",
@@ -491,7 +490,7 @@
     {
       "id": "placement-03-ypart-without-part-param",
       "category": "placement",
-      "description": "Physical line 2 is =ypart but restored =ybegin has no part= parameter (C-2 contradictory framing)",
+      "description": "Physical line 2 is =ypart but restored =ybegin has no part= parameter (contradictory framing)",
       "has_part_on_ybegin": false,
       "is_ypart_on_line2": true,
       "expected_error": "INVALID_MULTIPART_FRAMING",
@@ -502,7 +501,7 @@
     {
       "id": "placement-04-yencryption-line2-with-part-param",
       "category": "placement",
-      "description": "Physical line 2 is =yencryption (single-part placement), but restored =ybegin carries a part= parameter (C-2 contradictory framing)",
+      "description": "Physical line 2 is =yencryption (single-part placement), but restored =ybegin carries a part= parameter (contradictory framing)",
       "has_part_on_ybegin": true,
       "is_ypart_on_line2": false,
       "line_index": 2,
@@ -579,7 +578,7 @@
     },
     {
       "id": "metadata-04-body-only-vs-combined-only",
-      "category": "metadata_validation",
+      "category": "framing",
       "description": "Body-only-mode article (includes =yencryption line but omits Line 1 Control-Line bootstrap) presented to a combined-only receiver: mode unsupported",
       "expected_error": "CONTROL_LINE_DECRYPT_FAILURE",
       "expected_rejection_stage": "PROVIDER_FAILOVER",
