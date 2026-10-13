@@ -422,6 +422,10 @@ def extract_and_remove_yencryption(yenc_block: bytes) -> tuple[dict[str, Any], b
     if b"size" in ybegin_values and _required_int(ybegin_values, b"size", "=ybegin") >= (1 << 32):
         raise YEncEncryptionCryptoError("PROVIDER_FAILOVER: SIZE_OVERFLOW: size exceeds 4 GiB (2^32 bytes)")
 
+    # The AAD-declared geometry is needed after decryption to prove the actual
+    # plaintext length matches it (Body Std v1.2 §2.1: the tag authenticates the
+    # declared size, not the plaintext itself).
+    params["segment_bytes"] = segment_bytes
     params["aad"] = build_aad(name_bytes, part_number, part_begin, segment_bytes)
 
     clean_lines = raw_lines[:yenc_idx] + raw_lines[yenc_idx + 1 :]

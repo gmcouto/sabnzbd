@@ -26,7 +26,7 @@ from typing import Optional
 
 import sabctools
 import sabnzbd
-from sabnzbd.constants import SABCTOOLS_VERSION_REQUIRED
+from sabnzbd.constants import SABCTOOLS_VERSION_REQUIRED, Status
 from sabnzbd.nzb import Article
 from sabnzbd.misc import match_str
 from sabnzbd.encryption import (
@@ -154,12 +154,19 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
 
     except YEncEncryptionStructuralError as error:
         # Structural metadata failure (missing password, unsupported mode): fail the
-        # article without trying other servers (METADATA_VALIDATION tier).
+        # article without trying other servers (METADATA_VALIDATION tier). No other
+        # server can resolve a local structural error, so retrying remaining articles
+        # would only waste fetches and could register successes that falsely revive
+        # the job. End the whole job through the existing fail-to-history lifecycle:
+        # the queue stops scheduling the job and post-processing records it as
+        # FAILED with the fail_msg preserved.
         logging.error(T("Structural yEnc-encryption failure in %s: %s"), art_id, error)
         nzo.fail_msg = T("Structural yEnc-encryption failure: missing or invalid metadata")
         nzo.set_unpack_info("Download", nzo.fail_msg)
-        article_success = False
-        decoded_data = None
+        # Mark failed so pp_or_finished discards any in-flight articles of this job
+        nzo.status = Status.FAILED
+        sabnzbd.NzbQueue.fail_to_history(nzo)
+        return
 
     except YEncEncryptionCryptoError as error:
         # Crypto wire failure on encrypted articles (authentication failure, FF1
@@ -348,6 +355,20 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
             segment_index=seg_idx_line1,
             aad=yenc_params["aad"],
         )
+
+        # Body Standard v1.2 §2.1: the Poly1305 tag authenticates the DECLARED
+        # geometry (=ybegin size / =ypart range) carried in the AAD, but a corrupted
+        # or truncated-then-reCRC'd article can carry plaintext whose ACTUAL length
+        # differs from that declaration. sabctools' sub-decoder does not validate
+        # actual-vs-declared (part_size mirrors the declared keywords), so this check
+        # is made here, before any article mutation or cache write, so a wrong-length
+        # plaintext can never reach the cache or disk. Treated as provider corruption
+        # (PROVIDER_FAILOVER tier), like other corrupt-provider-copy failures.
+        if len(plaintext) != yenc_params["segment_bytes"]:
+            raise YEncEncryptionCryptoError(
+                f"LENGTH_MISMATCH: decrypted plaintext is {len(plaintext)} bytes but declared geometry is "
+                f"{yenc_params['segment_bytes']} bytes"
+            )
 
         decoded_data = bytearray(plaintext)
         article.file_size = sub_resp.file_size

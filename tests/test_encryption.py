@@ -2575,7 +2575,8 @@ class TestStructuralErrorFailsWithoutServerSearch:
         ):
             decoder.decode(article, response)
 
-            mock_queue.register_article.assert_called_once_with(article, False)
+            mock_queue.fail_to_history.assert_called_once_with(article.nzf.nzo)
+            mock_queue.register_article.assert_not_called()
             assert not article.search_new_server.called
             assert not mock_cache.save_article.called
             assert not article.on_disk
@@ -2616,7 +2617,8 @@ def test_missing_dependency_routes_to_structural_handler():
         mock.patch.object(sabnzbd, "NzbQueue", queue, create=True),
     ):
         decoder.decode(article, response)
-    queue.register_article.assert_called_once_with(article, False)
+    queue.fail_to_history.assert_called_once_with(article.nzf.nzo)
+    queue.register_article.assert_not_called()
     article.search_new_server.assert_not_called()
     cache.save_article.assert_not_called()
     assert not article.on_disk
@@ -2902,3 +2904,133 @@ def test_plain_substitution_does_not_mutate_article_metadata():
     with pytest.raises(YEncEncryptionCryptoError, match="UNAUTHENTICATED_ARTICLE"):
         decoder.decode_yenc(article, response)
     assert (article.file_size, article.data_begin, article.data_size, article.decoded_size) == original
+
+
+class TestDeclaredGeometryLengthMismatch:
+    """SB-4: the AEAD tag authenticates the DECLARED geometry (=ybegin size / =ypart range
+    in the AAD), not the plaintext itself. A corrupted or truncated-then-reCRC'd article
+    could carry plaintext whose actual length differs from the declaration. sabctools'
+    sub-decoder does not validate actual-vs-declared (part_size mirrors the declared
+    keywords), so decode_yenc must reject the mismatch before any cache write.
+    """
+
+    @staticmethod
+    def _wire_lines(plaintext: bytes, declared_bytes: int, salt, seg, master_key, multipart: bool):
+        """Build encrypted wire lines whose AAD/tag use the DECLARED geometry, while the
+        actual plaintext length may differ from it. Returns (lines, adapter)."""
+        import nacl.bindings as nb
+        import sabctools
+        from tests.encryption_helpers import ff1_encrypt
+
+        adapter = DecryptionAdapter(password="pw")
+        nonce = adapter.derive_body_nonce(master_key, seg)
+        aad = build_aad(b"test.bin", 1, 1, declared_bytes)
+        enc = nb.crypto_aead_xchacha20poly1305_ietf_encrypt(plaintext, aad, nonce, master_key)
+        ct, tag = enc[:-16], enc[-16:]
+        body, crc = sabctools.yenc_encode(ct)
+
+        if multipart:
+            lines_pt = [
+                f"=ybegin part=1 total=2 line=128 size={declared_bytes * 2} name=test.bin".encode(),
+                f"=ypart begin=1 end={declared_bytes}".encode(),
+                f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} index={seg:08x} tag={tag.hex()}".encode(),
+                body,
+                f"=yend size={declared_bytes * 2} part=1 pcrc32={crc:08x}".encode(),
+            ]
+            line_indices = [1, 2, 3, None, 5]
+        else:
+            lines_pt = [
+                f"=ybegin line=128 size={declared_bytes} name=test.bin".encode(),
+                f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} index={seg:08x} tag={tag.hex()}".encode(),
+                body,
+                f"=yend size={declared_bytes} crc32={crc:08x}".encode(),
+            ]
+            line_indices = [1, 2, None, 4]
+
+        lines = []
+        for pt, li in zip(lines_pt, line_indices):
+            if li is None:
+                lines.append(pt.decode("latin-1"))
+            elif li == 1:
+                k, t = adapter.derive_control_keys(master_key, seg, 1)
+                lines.append((salt + seg.to_bytes(4, "big") + ff1_encrypt(k, t, pt)).decode("latin-1"))
+            else:
+                k, t = adapter.derive_control_keys(master_key, seg, li)
+                lines.append(ff1_encrypt(k, t, pt).decode("latin-1"))
+        return lines, adapter
+
+    @staticmethod
+    def _decode(lines):
+        import sabnzbd.decoder as decoder
+
+        article = mock.MagicMock(spec=Article)
+        article.article = "length-mismatch@test"
+        article.nzf.nzo.password = "pw"
+        article.nzf.filename_checked = True
+        article.lowest_partnum = False
+        resp = _mock_response()
+        resp.lines = lines
+        return decoder.decode_yenc(article, resp), article
+
+    def test_single_part_actual_shorter_than_declared_is_rejected(self):
+        """Single-part: actual plaintext 16 bytes, declared size 26 -> provider-failover, no cache data."""
+        salt = bytes.fromhex("1a2b3c4d5e6f7890abcdef1234567890")
+        adapter = DecryptionAdapter(password="pw")
+        master_key = adapter.get_master_key(salt)
+        lines, _ = self._wire_lines(b"actual payload!!", 26, salt, 1, master_key, multipart=False)
+        with pytest.raises(YEncEncryptionCryptoError, match="LENGTH_MISMATCH"):
+            self._decode(lines)
+
+    def test_single_part_actual_longer_than_declared_is_rejected(self):
+        """Single-part: actual plaintext 30 bytes, declared size 26 -> provider-failover."""
+        salt = bytes.fromhex("1a2b3c4d5e6f7890abcdef1234567890")
+        adapter = DecryptionAdapter(password="pw")
+        master_key = adapter.get_master_key(salt)
+        lines, _ = self._wire_lines(b"x" * 30, 26, salt, 1, master_key, multipart=False)
+        with pytest.raises(YEncEncryptionCryptoError, match="LENGTH_MISMATCH"):
+            self._decode(lines)
+
+    def test_multipart_actual_range_mismatch_is_rejected(self):
+        """Multipart: the =ypart range declares the segment; actual length differing is rejected."""
+        salt = bytes.fromhex("1a2b3c4d5e6f7890abcdef1234567890")
+        adapter = DecryptionAdapter(password="pw")
+        master_key = adapter.get_master_key(salt)
+        lines, _ = self._wire_lines(b"actual payload!!", 26, salt, 1, master_key, multipart=True)
+        with pytest.raises(YEncEncryptionCryptoError, match="LENGTH_MISMATCH"):
+            self._decode(lines)
+
+    def test_matching_length_still_decodes(self):
+        """Control: declared geometry equal to actual length keeps decoding as before."""
+        salt = bytes.fromhex("1a2b3c4d5e6f7890abcdef1234567890")
+        adapter = DecryptionAdapter(password="pw")
+        master_key = adapter.get_master_key(salt)
+        plaintext = b"exact ten ok"
+        lines, _ = self._wire_lines(plaintext, len(plaintext), salt, 1, master_key, multipart=False)
+        decoded, _ = self._decode(lines)
+        assert decoded == bytearray(plaintext)
+
+    def test_rejection_happens_before_article_metadata_mutation(self):
+        """A mismatching article must leave file_size/data_begin/data_size/decoded_size untouched."""
+        import sabnzbd.decoder as decoder
+
+        salt = bytes.fromhex("1a2b3c4d5e6f7890abcdef1234567890")
+        adapter = DecryptionAdapter(password="pw")
+        master_key = adapter.get_master_key(salt)
+        lines, _ = self._wire_lines(b"actual payload!!", 26, salt, 1, master_key, multipart=False)
+        article = mock.MagicMock(spec=Article)
+        article.article = "length-mismatch-meta@test"
+        article.nzf.nzo.password = "pw"
+        article.nzf.filename_checked = True
+        article.lowest_partnum = False
+        original = (article.file_size, article.data_begin, article.data_size, article.decoded_size, article.crc32)
+        resp = _mock_response()
+        resp.lines = lines
+        with pytest.raises(YEncEncryptionCryptoError, match="LENGTH_MISMATCH"):
+            decoder.decode_yenc(article, resp)
+        assert (
+            article.file_size,
+            article.data_begin,
+            article.data_size,
+            article.decoded_size,
+            article.crc32,
+        ) == original
