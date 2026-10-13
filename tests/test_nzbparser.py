@@ -177,6 +177,25 @@ class TestNzbParser:
         with pytest.raises(YEncEncryptionStructuralError, match="MISSING_PASSWORD"):
             nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, "ws_pw", ws_pw_xml), ws_pw_nzo)
 
+    @pytest.mark.parametrize("missing", ["_lazy_argon2", "_lazy_nacl_bindings"])
+    @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
+    def test_encrypted_ingest_rejects_missing_crypto_dependency(self, missing):
+        """A missing crypto package rejects the encrypted NZB at ingest, before any article is fetched."""
+        from unittest import mock
+        from sabnzbd.encryption import MissingDependencyError
+
+        xml = """<?xml version="1.0" encoding="utf-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
+ <head><meta type="yenc_encrypted">true</meta><meta type="password">pw</meta></head>
+ <file poster="p@test.com" date="1600000000" subject="opaque">
+  <segments><segment bytes="1000" number="1">dep@test</segment></segments>
+ </file>
+</nzb>"""
+        nzo = NzbObject("missing_dep")
+        with mock.patch.object(nzbparser, missing, side_effect=MissingDependencyError("not installed")):
+            with pytest.raises(MissingDependencyError):
+                nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, "missing_dep", xml), nzo)
+
     @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
     def test_encrypted_ingest_version_cipher_and_order_validation(self):
         """Validate supplied version/cipher/mode during ingest before NNTP, independent of meta tag order."""
@@ -206,7 +225,7 @@ class TestNzbParser:
         nzo_ok = NzbObject("ok")
         nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, "ok", xml_ok), nzo_ok)
         assert nzo_ok.yenc_encrypted is True
-        assert nzo_ok.password == "secret123"
+        assert nzo_ok.meta["password"] == ["secret123"]
 
         # 2. Version and cipher absent -> succeeds (defaults apply)
         xml_absent = make_nzb(
@@ -218,7 +237,7 @@ class TestNzbParser:
         nzo_absent = NzbObject("absent")
         nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, "absent", xml_absent), nzo_absent)
         assert nzo_absent.yenc_encrypted is True
-        assert nzo_absent.password == "secret_absent"
+        assert nzo_absent.meta["password"] == ["secret_absent"]
 
         # 3. Independent of metadata ordering (reversed order)
         xml_reversed = make_nzb(
@@ -233,7 +252,7 @@ class TestNzbParser:
         nzo_rev = NzbObject("reversed")
         nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, "reversed", xml_reversed), nzo_rev)
         assert nzo_rev.yenc_encrypted is True
-        assert nzo_rev.password == "reversed_pw"
+        assert nzo_rev.meta["password"] == ["reversed_pw"]
 
         # 4. Unsupported version -> raises YEncEncryptionStructuralError
         xml_bad_ver = make_nzb(
@@ -277,7 +296,7 @@ class TestNzbParser:
             nzo = NzbObject(f"mode_{mode}")
             nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, f"mode_{mode}", xml), nzo)
             assert nzo.yenc_encrypted is True, mode
-            assert nzo.password == "secret123", mode
+            assert nzo.meta["password"] == ["secret123"], mode
 
     @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
     def test_yenc_meta_values_are_trimmed_and_ascii_case_insensitive(self):
@@ -310,7 +329,7 @@ class TestNzbParser:
             nzo = NzbObject(f"accepted_{idx}")
             nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, f"accepted_{idx}", make_nzb(entries)), nzo)
             assert nzo.yenc_encrypted is True, idx
-        assert nzo.password == "  padded pw  "
+        assert nzo.meta["password"] == ["  padded pw  "]
 
         rejected = [
             ([("yenc_encrypted", "true"), ("yenc_version", "1.3"), ("password", "pw")], "UNSUPPORTED_VERSION"),

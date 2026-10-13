@@ -365,6 +365,18 @@ class NewsWrapper:
         if self.decoder is None:
             return 0, None
 
+        encrypted = bool(
+            self.article
+            and getattr(self.article, "nzf", None)
+            and getattr(self.article.nzf, "nzo", None)
+            and self.article.nzf.nzo.yenc_encrypted
+        )
+        if encrypted:
+            # Bare LF is rewritten to CRLF below, which at most doubles a chunk. Reading at most
+            # half of the free buffer guarantees the rewritten chunk always fits.
+            half = max(1, len(memoryview(self.decoder)) // 2)
+            nbytes = min(nbytes, half) if nbytes else half
+
         # Receive data into the decoder pre-allocated buffer
         if not nbytes and self.nntp.nw.server.ssl and not self.nntp.nw.blocking and sabctools.openssl_linked:
             # Use patched version when downloading
@@ -386,12 +398,7 @@ class NewsWrapper:
         # A CRLF can also be split across TCP chunks: a chunk that begins with a lone
         # '\n' is the second half of a CRLF when the previous chunk ended with '\r',
         # and must be left byte-exact or the article terminator is corrupted.
-        if (
-            self.article
-            and getattr(self.article, "nzf", None)
-            and getattr(self.article.nzf, "nzo", None)
-            and self.article.nzf.nzo.yenc_encrypted
-        ):
+        if encrypted:
             mv = memoryview(self.decoder)
             raw_chunk = bytes(mv[:bytes_recv])
             split_crlf = raw_chunk.startswith(b"\n") and self._prev_chunk_ended_with_cr
@@ -407,8 +414,6 @@ class NewsWrapper:
                     # The leading '\n' already pairs with the previous chunk's '\r' in the
                     # buffer; drop the synthetic '\r' so it stays a single CRLF.
                     norm_chunk = norm_chunk[1:]
-                if len(norm_chunk) > len(mv):
-                    raise BufferError("Normalized chunk exceeds decoder buffer size")
                 mv[: len(norm_chunk)] = norm_chunk
                 bytes_recv = len(norm_chunk)
 

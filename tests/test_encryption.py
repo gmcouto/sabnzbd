@@ -1514,7 +1514,7 @@ def _registered_success(queue_mock) -> bool:
 
 
 class TestBodyCommandForEncryptedArticles:
-    """SB-2: encrypted articles are fetched with BODY so no ARTICLE header scan (or trial decryption) happens."""
+    """Encrypted articles are fetched with BODY so no ARTICLE header scan (or trial decryption) happens."""
 
     @staticmethod
     def _queued_command(have_body: bool, yenc_encrypted) -> bytes:
@@ -1573,7 +1573,7 @@ class TestBodyCommandForEncryptedArticles:
         """Run `requests` article fetches through a real NewsWrapper; returns (cache mock, queue mock)."""
         s1 = Server(
             server_id="srv_sb2",
-            displayname="SB-2 Server",
+            displayname="Encrypted Server",
             host=srv.host,
             port=srv.port,
             timeout=5,
@@ -2307,9 +2307,9 @@ class TestStructuralNoPasswordEncryptedWire:
         with pytest.raises(YEncEncryptionStructuralError, match="MISSING_PASSWORD"):
             decoder.decode_yenc(article, resp)
 
-    def test_authenticated_empty_segment_counts_as_decoded(self):
-        """An authenticated zero-length plaintext is decoded/complete — the empty
-        segment must count as decoded, not fall through as missing data."""
+    def test_authenticated_empty_segment_counts_as_complete(self):
+        """An authenticated zero-length plaintext is complete: nothing is cached, and the
+        article is marked on_disk so the assembler advances past it."""
         import nacl.bindings as nb
         import sabctools
         import sabnzbd.decoder as decoder
@@ -2371,9 +2371,7 @@ class TestStructuralNoPasswordEncryptedWire:
             mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
         ):
             decoder.decode(article, resp)
-            # An empty authenticated plaintext IS complete: marked decoded, nothing
-            # cached, and never treated as ordinary streamed output.
-            assert article.decoded is True
+            assert article.on_disk is True
             assert not mock_cache.save_article.called
 
 
@@ -2507,9 +2505,8 @@ class TestMissingCryptoDependencies:
                 adapter.get_master_key(b"\x01" * 16)
 
             # MissingDependencyError must NOT be routed as provider corruption:
-            # it derives from YEncEncryptionStructuralError and ImportError, not YEncEncryptionCryptoError.
+            # it derives from YEncEncryptionStructuralError, not YEncEncryptionCryptoError.
             assert isinstance(MissingDependencyError("x"), YEncEncryptionStructuralError)
-            assert isinstance(MissingDependencyError("x"), ImportError)
             assert not isinstance(MissingDependencyError("x"), YEncEncryptionCryptoError)
         finally:
             self._restore_crypto_modules(blocker, saved)
@@ -2752,7 +2749,7 @@ class TestConvergenceRegressions:
             adapter.restore_control_lines(broken)
 
     def test_bare_lf_unencrypted_chunk_is_unchanged(self):
-        """Bytes passed to the decoder equal the bytes received; bytes_recv unchanged (SB-1)."""
+        """Bytes passed to the decoder equal the bytes received; bytes_recv unchanged."""
         server = mock.MagicMock()
         server.timeout = 10
         server.ssl = False
@@ -2788,54 +2785,54 @@ class TestConvergenceRegressions:
         assert dec.processed == [len(chunk) for chunk in chunks]
 
     def test_bare_lf_expansion_never_exceeds_buffer(self):
-        """A chunk of all \n filling the buffer does not overrun (SB-1)."""
+        """Reads on encrypted jobs leave room for bare-LF to CRLF expansion, so no article is lost."""
         server = mock.MagicMock()
         server.timeout = 10
         server.ssl = False
         server.pipelining_requests.return_value = 1
 
-        nw = NewsWrapper(server, thrdnum=1)
         buf_size = 64
-        dec = _FakeDecoder(buf_size)
-        nw.decoder = dec
-        nw.nntp = mock.MagicMock()
-        nw.nntp.nw = nw
+        stream = b"\n" * (buf_size * 3)
 
-        raw_chunk = b"\n" * buf_size
+        def run(encrypted):
+            nw = NewsWrapper(server, thrdnum=1)
+            dec = _FakeDecoder(buf_size)
+            nw.decoder = dec
+            nw.nntp = mock.MagicMock()
+            nw.nntp.nw = nw
+            position = 0
+            seen = bytearray()
 
-        def fake_recv_into(buf, nbytes=0):
-            mv = memoryview(buf)
-            mv[: len(raw_chunk)] = raw_chunk
-            return len(raw_chunk)
+            def fake_recv_into(buf, nbytes=0):
+                # Like socket.recv_into: fill at most nbytes (default: the whole buffer)
+                nonlocal position
+                count = min(nbytes or len(buf), len(buf), len(stream) - position)
+                memoryview(buf)[:count] = stream[position : position + count]
+                position += count
+                return count
 
-        nw.nntp.sock.recv_into = fake_recv_into
+            def fake_process(count):
+                seen.extend(dec[:count])
 
-        # 1. Unencrypted release: ordinary path never rewrites, thus never overruns
-        mock_article_unenc = mock.MagicMock()
-        mock_article_unenc.nzf.nzo.yenc_encrypted = False
-        with (
-            mock.patch.object(NewsWrapper, "article", new_callable=mock.PropertyMock) as mock_art_prop,
-            mock.patch.object(sabnzbd, "Downloader", create=True),
-        ):
-            mock_art_prop.return_value = mock_article_unenc
-            nrecv, _ = nw.read()
+            dec.process = fake_process
+            nw.nntp.sock.recv_into = fake_recv_into
 
-        assert nrecv == buf_size
-        assert dec.processed == [buf_size]
-        assert bytes(dec[:buf_size]) == raw_chunk
+            article = mock.MagicMock()
+            article.nzf.nzo.yenc_encrypted = encrypted
+            with (
+                mock.patch.object(NewsWrapper, "article", new_callable=mock.PropertyMock) as mock_art_prop,
+                mock.patch.object(sabnzbd, "Downloader", create=True),
+            ):
+                mock_art_prop.return_value = article
+                while position < len(stream):
+                    nw.read()
+            return bytes(seen)
 
-        # 2. Encrypted release: expansion is bounded; if it exceeds buffer, BufferError is raised
-        dec_enc = _FakeDecoder(buf_size)
-        nw.decoder = dec_enc
-        mock_article_enc = mock.MagicMock()
-        mock_article_enc.nzf.nzo.yenc_encrypted = True
-        with (
-            mock.patch.object(NewsWrapper, "article", new_callable=mock.PropertyMock) as mock_art_prop,
-            mock.patch.object(sabnzbd, "Downloader", create=True),
-        ):
-            mock_art_prop.return_value = mock_article_enc
-            with pytest.raises(BufferError, match="exceeds decoder buffer size"):
-                nw.read()
+        # Unencrypted release: the ordinary path never rewrites the bytes
+        assert run(False) == stream
+
+        # Encrypted release: every bare LF becomes CRLF and no read overflows the buffer
+        assert run(True) == stream.replace(b"\n", b"\r\n")
 
 
 def test_key_cache_capacity_evicts_oldest():

@@ -52,7 +52,7 @@ from sabnzbd.filesystem import (
     remove_file,
 )
 from sabnzbd.misc import name_to_cat, cat_pp_script_sanitizer
-from sabnzbd.encryption import YEncEncryptionStructuralError
+from sabnzbd.encryption import YEncEncryptionStructuralError, _lazy_argon2, _lazy_nacl_bindings
 from sabnzbd.constants import DEFAULT_PRIORITY, VALID_ARCHIVES, AddNzbFileResult
 from sabnzbd.misc import SABRarFile
 import rarfile
@@ -548,5 +548,6 @@ def nzbfile_parser(full_nzb_path: str, nzo):
                 "MISSING_PASSWORD: NZB declares yenc_encrypted=true but no password meta was supplied"
             )
 
-        if not has_attr_pw and meta_pws:
-            nzo.password = meta_pws[0]
+        # Reject the NZB now rather than at the first article if a crypto dependency is missing
+        _lazy_argon2()
+        _lazy_nacl_bindings()

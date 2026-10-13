@@ -233,20 +233,10 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
         if search_new_server(article):
             return
 
-    # Distinguish "nothing produced" (None — streamed straight to disk
-    # or no decode happened) from "produced empty" (an authenticated zero-length
-    # plaintext, which the encrypted-wire path legitimately yields for empty
-    # segments). An empty-but-complete article must count as decoded, never fall
-    # through to the on_disk branch with zero bytes written anywhere.
     if decoded_data:
         # If the data needs to be written to disk due to full cache, this will be slow
         # Causing the decoder-queue to fill up and delay the downloader
         sabnzbd.ArticleCache.save_article(article, decoded_data)
-        article.decoded = True
-    elif decoded_data is not None:
-        # Authenticated empty segment on an encrypted release: complete, nothing cached
-        # or assembled. Marked decoded (not on_disk) so the assembler advances without
-        # stalling on unwritten data. Unencrypted empty articles only occur on precheck.
         article.decoded = True
     elif not nzo.precheck and (article_success or not _is_yenc_encrypted(article)):
         # Either there was nothing to save, or the decoder streamed it straight to the
@@ -337,11 +327,7 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
         # Constant synthetic response status; the sub-decoder never reads the Message-ID.
         # sabctools requires CRLF framing for its internal parsing state machine.
         clean_yenc = neutral_ybegin_name(clean_yenc)
-        clean_yenc_crlf = clean_yenc.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
-        clean_wire = b"222 0 <x>\r\n" + clean_yenc_crlf
-        if not clean_wire.endswith(b"\r\n"):
-            clean_wire += b"\r\n"
-        clean_wire += b".\r\n"
+        clean_wire = b"222 0 <x>\r\n" + clean_yenc + b".\r\n"
 
         dec = sabctools.Decoder(len(clean_wire))
         reader = io.BytesIO(clean_wire)

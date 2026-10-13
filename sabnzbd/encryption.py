@@ -57,7 +57,7 @@ class YEncEncryptionCryptoError(ValueError):
 # Minimal non-empty dependency diagnostics: raised structurally when an encrypted
 # job needs a package that is not installed (METADATA_VALIDATION tier - the job
 # cannot proceed on any server, so no alternate-provider query is made).
-class MissingDependencyError(YEncEncryptionStructuralError, ImportError):
+class MissingDependencyError(YEncEncryptionStructuralError):
     pass
 
 
@@ -296,8 +296,8 @@ _NAME_KEYWORD = re.compile(rb"(?:^|[ \t])name=")
 def _ybegin_header(line1: bytes) -> tuple[list[bytes], Optional[bytes]]:
     """Split a restored =ybegin line into its keywords before name= and the raw name value.
 
-    Only keywords before name= describe the layout (Control Std v1.2 §5 step 4): a name such as
-    ``my part=2.bin`` must not make a single-part article multipart. The name value is returned as
+    Only keywords before name= are keywords (Control Std v1.2 §5 step 4): a name such as
+    ``my part=2.bin`` must not be read as a part= keyword. The name value is returned as
     raw bytes, without decoding, because it is the AAD subject (Body Std v1.2 §2.1).
     """
     content = line1.rstrip(b"\r\n")
@@ -307,8 +307,8 @@ def _ybegin_header(line1: bytes) -> tuple[list[bytes], Optional[bytes]]:
     return content[: match.start()].split(), content[match.end() :]
 
 
-def _is_multipart_ybegin(header_tokens: list[bytes]) -> bool:
-    """Multipart only when a part= keyword precedes name= (Control Std v1.2 §5 step 4)."""
+def _ybegin_has_part(header_tokens: list[bytes]) -> bool:
+    """Whether a part= keyword precedes name=. Line 2 decides the layout; part= is only cross-checked against it."""
     return any(token.startswith(b"part=") for token in header_tokens)
 
 
@@ -336,7 +336,9 @@ def extract_and_remove_yencryption(yenc_block: bytes) -> tuple[dict[str, Any], b
     Validates:
     - Block has at least 2 lines.
     - Line 1 starts with b"=ybegin".
-    - If multipart (part= in line 1):
+    - Line 2 decides the layout (=ypart for multipart, =yencryption for single-part); part= in line 1
+      is only cross-checked against it and supplies the AAD partNumber.
+    - If multipart (line 2 is =ypart):
         - Block has at least 3 lines.
         - Line 2 starts with b"=ypart".
         - Line 3 starts with b"=yencryption".
@@ -358,7 +360,7 @@ def extract_and_remove_yencryption(yenc_block: bytes) -> tuple[dict[str, Any], b
         raise YEncEncryptionCryptoError("Line 1 does not start with =ybegin")
 
     header_tokens, name_bytes = _ybegin_header(line1)
-    pt1_has_part = _is_multipart_ybegin(header_tokens)
+    pt1_has_part = _ybegin_has_part(header_tokens)
 
     line2 = raw_lines[1]
     if line2.startswith(b"=ypart"):
@@ -608,8 +610,9 @@ class DecryptionAdapter:
     def restore_control_lines(self, yenc_block: bytes) -> tuple[bytes, bytes, int]:
         """Restore encrypted control lines in a yEnc article block per Control Lines Standard v1.2 §5.
 
-        Deterministic combined-mode restoration (Control Std v1.2 §5): header positions are
-        inferred from the restored =ybegin line only; data lines pass through untouched
+        Deterministic combined-mode restoration (Control Std v1.2 §5): the layout is
+        decided by physical line 2 (=ypart or =yencryption), with part= in the restored =ybegin
+        line only cross-checked against it; data lines pass through untouched
         byte-for-byte and are never decrypted or inspected; the footer is identified by
         position (last physical line), never by content search. Line terminators are
         preserved byte-for-byte (bare LF is never canonicalized to CRLF).
@@ -646,7 +649,7 @@ class DecryptionAdapter:
         enc_key2, tweak2 = self.derive_control_keys(master_key, segment_index, 2)
         pt2 = self.decrypt_control_line(line2_content, enc_key2, tweak2)
 
-        pt1_has_part = _is_multipart_ybegin(_ybegin_header(pt1)[0])
+        pt1_has_part = _ybegin_has_part(_ybegin_header(pt1)[0])
         restored_lines: list[bytes] = [pt1 + line1_ending]
 
         if pt2.startswith(b"=ypart"):
