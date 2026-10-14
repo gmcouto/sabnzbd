@@ -37,8 +37,8 @@ httptools==0.8.0
 # Using older versions can have security implications!
 cryptography>=3.0
 
-# yEnc encryption (experimental): used lazily - only encrypted downloads need these;
-# ordinary downloads and application startup work without them
+# yEnc encryption (experimental): required for encrypted downloads; imported at module
+# top level like the other dependencies above
 argon2-cffi==25.1.0
 pynacl==1.6.2
 

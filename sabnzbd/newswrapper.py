@@ -45,10 +45,10 @@ socket.setdefaulttimeout(DEF_NETWORKING_TIMEOUT)
 def _requires_body(article: "sabnzbd.nzb.Article") -> bool:
     """Whether the article must be fetched with BODY (RFC 3977 section 6.2.3).
 
-    Only a literal True counts: NZO defaults to False and anything else is not a
-    declared encrypted release, so ordinary articles keep the server's chosen command.
+    NZO defaults to False, so anything else is not a declared encrypted release and
+    ordinary articles keep the server's chosen command.
     """
-    return getattr(article.nzf.nzo, "yenc_encrypted", False) is True
+    return bool(article.nzf.nzo.yenc_encrypted)
 
 
 class NNTPPermanentError(Exception):
@@ -365,12 +365,8 @@ class NewsWrapper:
         if self.decoder is None:
             return 0, None
 
-        encrypted = bool(
-            self.article
-            and getattr(self.article, "nzf", None)
-            and getattr(self.article.nzf, "nzo", None)
-            and self.article.nzf.nzo.yenc_encrypted
-        )
+        article = self.article
+        encrypted = bool(article and article.nzf.nzo.yenc_encrypted)
         if encrypted:
             # Bare LF is rewritten to CRLF below, which at most doubles a chunk. Reading at most
             # half of the free buffer guarantees the rewritten chunk always fits.

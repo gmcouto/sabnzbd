@@ -17,11 +17,6 @@
 
 """
 sabnzbd.encryption - Decryption adapter encapsulating Argon2id, PyNaCl, and FF1.
-
-The heavy crypto dependencies (argon2-cffi, PyNaCl) are imported lazily so that
-ordinary (unencrypted) downloads and application startup work without them;
-encrypted jobs check availability on first use and fail structurally with an
-actionable diagnostic when a package is missing.
 """
 
 import hashlib
@@ -32,17 +27,16 @@ import struct
 import threading
 from typing import Any, Optional
 
+import argon2.low_level as argon2_ll
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+import nacl.bindings as nacl_bindings
 
 
 class YEncEncryptionStructuralError(ValueError):
-    """Structural yEnc-encryption metadata failure (missing/empty password, unsupported mode).
+    """Structural yEnc-encryption metadata failure (missing/empty password, unsupported version/cipher).
 
-    Per the tier separation in the yEnc encryption standards: structural failures abort the
-    article without trying another server - no plaintext or ciphertext is released.
-    Inherits from ValueError so existing ``isinstance(e, ValueError)`` handlers still catch it,
-    but decoder.py catches this class FIRST to fail this article without trying other servers instead of using the
-    retryable provider-failover tier (METADATA_VALIDATION semantics).
+    Fails the whole job through the fail-to-history lifecycle; never fails over to other servers.
+    No plaintext or ciphertext is released.
     """
 
 
@@ -54,46 +48,13 @@ class YEncEncryptionCryptoError(ValueError):
     """
 
 
-# Minimal non-empty dependency diagnostics: raised structurally when an encrypted
-# job needs a package that is not installed (METADATA_VALIDATION tier - the job
-# cannot proceed on any server, so no alternate-provider query is made).
-class MissingDependencyError(YEncEncryptionStructuralError):
-    pass
-
-
-def _lazy_argon2():
-    """Import argon2.low_level lazily; raise a structural diagnostic when absent."""
-    try:
-        import argon2.low_level as ll
-
-        return ll
-    except ImportError as e:
-        raise MissingDependencyError(
-            "yEnc-encrypted download requires the 'argon2-cffi' package (pip install argon2-cffi)"
-        ) from e
-
-
-def _lazy_nacl_bindings():
-    """Import nacl.bindings lazily; raise a structural diagnostic when absent."""
-    try:
-        import nacl.bindings as nb
-
-        return nb
-    except ImportError as e:
-        raise MissingDependencyError(
-            "yEnc-encrypted download requires the 'pynacl' package (pip install pynacl)"
-        ) from e
-
-
 BOOTSTRAP_PREFIX_LEN = 20
 
 
 def _split_ending(line: bytes) -> tuple[bytes, bytes]:
-    """Split line content and line ending (b'\r\n', b'\n', or b'')."""
+    """Split line content and CRLF terminator (b'\r\n')."""
     if line.endswith(b"\r\n"):
         return line[:-2], b"\r\n"
-    elif line.endswith(b"\n"):
-        return line[:-1], b"\n"
     return line, b""
 
 
@@ -326,7 +287,7 @@ def _required_int(values: dict[bytes, bytes], key: bytes, line_name: str) -> int
     """Read a mandatory decimal keyword needed for the AAD; a missing or malformed one fails under PROVIDER_FAILOVER."""
     raw = values.get(key, b"")
     if not raw.isdigit():
-        raise YEncEncryptionCryptoError(f"PROVIDER_FAILOVER: {line_name} lacks a valid {key.decode()}= parameter")
+        raise YEncEncryptionCryptoError(f"{line_name} lacks a valid {key.decode()}= parameter")
     return int(raw)
 
 
@@ -369,7 +330,7 @@ def extract_and_remove_yencryption(yenc_block: bytes) -> tuple[dict[str, Any], b
             raise YEncEncryptionCryptoError(f"Multipart article too short: {len(raw_lines)} line(s)")
         if not pt1_has_part:
             raise YEncEncryptionCryptoError(
-                "PROVIDER_FAILOVER: line 2 is not =yencryption at its fixed position (INVALID_MULTIPART_FRAMING: multipart line 2 is =ypart but line 1 has no part= parameter)"
+                "Line 2 is not =yencryption at its fixed position (INVALID_MULTIPART_FRAMING: multipart line 2 is =ypart but line 1 has no part= parameter)"
             )
         line3 = raw_lines[2]
         if not line3.startswith(b"=yencryption"):
@@ -397,9 +358,9 @@ def extract_and_remove_yencryption(yenc_block: bytes) -> tuple[dict[str, Any], b
 
     # Mandatory name parameter for AAD (Body Standard v1.2 §2.1)
     if name_bytes is None:
-        raise YEncEncryptionCryptoError("PROVIDER_FAILOVER: missing mandatory name parameter in =ybegin")
+        raise YEncEncryptionCryptoError("Missing mandatory name parameter in =ybegin")
     if not name_bytes:
-        raise YEncEncryptionCryptoError("PROVIDER_FAILOVER: empty name parameter in =ybegin")
+        raise YEncEncryptionCryptoError("Empty name parameter in =ybegin")
 
     # AAD geometry comes only from the restored =ybegin/=ypart keywords (Body Std v1.2 §2.1).
     # A missing or malformed keyword the AAD needs is PROVIDER_FAILOVER, never a silent default.
@@ -410,7 +371,7 @@ def extract_and_remove_yencryption(yenc_block: bytes) -> tuple[dict[str, Any], b
         part_begin = _required_int(ypart_values, b"begin", "=ypart")
         part_end = _required_int(ypart_values, b"end", "=ypart")
         if part_end < part_begin:
-            raise YEncEncryptionCryptoError("PROVIDER_FAILOVER: =ypart end is before begin")
+            raise YEncEncryptionCryptoError("=ypart end is before begin")
         segment_bytes = part_end - part_begin + 1
     else:
         part_number = 1
@@ -418,15 +379,26 @@ def extract_and_remove_yencryption(yenc_block: bytes) -> tuple[dict[str, Any], b
         segment_bytes = _required_int(ybegin_values, b"size", "=ybegin")
 
     if part_begin >= (1 << 32) or segment_bytes >= (1 << 32):
-        raise YEncEncryptionCryptoError("PROVIDER_FAILOVER: SIZE_OVERFLOW: size or offset exceeds 4 GiB (2^32 bytes)")
+        raise YEncEncryptionCryptoError("SIZE_OVERFLOW: size or offset exceeds 4 GiB (2^32 bytes)")
     if b"size" in ybegin_values and _required_int(ybegin_values, b"size", "=ybegin") >= (1 << 32):
-        raise YEncEncryptionCryptoError("PROVIDER_FAILOVER: SIZE_OVERFLOW: size exceeds 4 GiB (2^32 bytes)")
+        raise YEncEncryptionCryptoError("SIZE_OVERFLOW: size exceeds 4 GiB (2^32 bytes)")
 
     # The AAD-declared geometry is needed after decryption to prove the actual
     # plaintext length matches it (Body Std v1.2 §2.1: the tag authenticates the
     # declared size, not the plaintext itself).
     params["segment_bytes"] = segment_bytes
     params["aad"] = build_aad(name_bytes, part_number, part_begin, segment_bytes)
+
+    # The real =ybegin name for filename detection. The sub-decoder never sees it
+    # (the block handed to sabctools carries the neutralized name=x placeholder),
+    # so it cannot be taken from its response. Decoded the same way sabctools
+    # decodes name= for ordinary yEnc: trailing whitespace stripped, then UTF-8
+    # with a latin-1 fallback (sabctools' own per-line decoding).
+    stripped_name = name_bytes.rstrip(b" \t\r\n")
+    try:
+        params["file_name"] = stripped_name.decode("utf-8")
+    except UnicodeDecodeError:
+        params["file_name"] = stripped_name.decode("latin-1")
 
     clean_lines = raw_lines[:yenc_idx] + raw_lines[yenc_idx + 1 :]
     return params, b"".join(clean_lines)
@@ -511,28 +483,6 @@ class DecryptionAdapter:
         self._key_cache: dict[bytes, bytes] = {}
         self._lock = threading.Lock()
 
-    def _derive_argon2id(
-        self,
-        secret: bytes,
-        salt: bytes,
-        time_cost: int,
-        memory_cost: int,
-        parallelism: int,
-        hash_len: int,
-        type: Any,
-        version: int,
-    ) -> bytes:
-        return _lazy_argon2().hash_secret_raw(
-            secret=secret,
-            salt=salt,
-            time_cost=time_cost,
-            memory_cost=memory_cost,
-            parallelism=parallelism,
-            hash_len=hash_len,
-            type=type,
-            version=version,
-        )
-
     def get_master_key(self, salt: bytes) -> bytes:
         """Derive 32-byte master key via Argon2id RFC 9106, thread-safely caching by salt."""
         with self._lock:
@@ -540,18 +490,17 @@ class DecryptionAdapter:
                 return self._key_cache[salt]
             if not self.password:
                 raise YEncEncryptionStructuralError("MISSING_PASSWORD: no password supplied for yEnc-encrypted article")
-            key = self._derive_argon2id(
+            key = argon2_ll.hash_secret_raw(
                 secret=self.password.encode("utf-8"),
                 salt=salt,
                 time_cost=1,
                 memory_cost=65536,  # 64 MiB
                 parallelism=4,
                 hash_len=32,
-                type=_lazy_argon2().Type.ID,
+                type=argon2_ll.Type.ID,
                 version=0x13,
             )
-            if len(self._key_cache) >= 16:
-                self._key_cache.pop(next(iter(self._key_cache)))
+            self._key_cache.clear()
             self._key_cache[salt] = key
             return key
 
@@ -583,9 +532,7 @@ class DecryptionAdapter:
         nonce = self.derive_body_nonce(key, segment_index)
         ct_and_tag = ciphertext + tag
         try:
-            return _lazy_nacl_bindings().crypto_aead_xchacha20poly1305_ietf_decrypt(ct_and_tag, aad, nonce, key)
-        except MissingDependencyError:
-            raise
+            return nacl_bindings.crypto_aead_xchacha20poly1305_ietf_decrypt(ct_and_tag, aad, nonce, key)
         except Exception as e:
             # Zero-output guarantee: release zero bytes
             raise YEncEncryptionCryptoError(f"Poly1305 authentication failed: {e}") from e
@@ -606,9 +553,7 @@ class DecryptionAdapter:
         enc_key, tweak = self.derive_control_keys(master_key, segment_index, line_index)
         pt_enc = self.decrypt_control_line(content, enc_key, tweak)
         if not pt_enc.startswith(b"=yencryption"):
-            raise YEncEncryptionCryptoError(
-                f"PROVIDER_FAILOVER: line {line_index} is not =yencryption at its fixed position"
-            )
+            raise YEncEncryptionCryptoError(f"Line {line_index} is not =yencryption at its fixed position")
         return pt_enc + ending
 
     def restore_control_lines(self, yenc_block: bytes) -> tuple[bytes, bytes, int]:
@@ -618,21 +563,13 @@ class DecryptionAdapter:
         decided by physical line 2 (=ypart or =yencryption), with part= in the restored =ybegin
         line only cross-checked against it; data lines pass through untouched
         byte-for-byte and are never decrypted or inspected; the footer is identified by
-        position (last physical line), never by content search. Line terminators are
-        preserved byte-for-byte (bare LF is never canonicalized to CRLF).
+        position (last physical line), never by content search. The SAB transport layer
+        (newswrapper.read) rewrites bare LF to CRLF and decoder.py rebuilds the block
+        with CRLF terminators, so every line here ends with CRLF.
 
         Returns (restored_yenc_block, salt, segment_index).
-
-        N (the footer lineIndex) is the 1-based line index of the =yend line. Trailing
-        blank lines after the footer are outside the yEnc block and excluded from
-        lineIndex accounting; they are preserved as-is after the restored footer.
         """
         raw_lines = split_lines_preserving_endings(yenc_block)
-
-        # Preserve trailing blank lines if present, while finding true footer line
-        trailing_lines: list[bytes] = []
-        while raw_lines and not raw_lines[-1].strip():
-            trailing_lines.insert(0, raw_lines.pop())
 
         # Line 1 (lineIndex=1): bootstrap prefix + FF1-encrypted =ybegin
         line1_content, line1_ending = _split_ending(raw_lines[0])
@@ -692,6 +629,5 @@ class DecryptionAdapter:
         if not pt_footer.startswith(b"=yend"):
             raise YEncEncryptionCryptoError("Control line decrypt failure: footer does not start with =yend")
         restored_lines.append(pt_footer + footer_ending)
-        restored_lines.extend(trailing_lines)
 
         return b"".join(restored_lines), salt, segment_index

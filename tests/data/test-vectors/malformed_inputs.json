@@ -436,7 +436,7 @@
       "zero_output_required": true
     },
     {
-      "id": "header-12-uppercase-hex",
+      "id": "malformed-header-18-uppercase-hex",
       "category": "header_syntax",
       "description": "Uppercase hexadecimal salt is not canonical",
       "input_line": "=yencryption cipher=XChaCha20-Poly1305 salt=1A2B3C4D5E6F7890ABCDEF1234567890 index=00000001 tag=22e2fc27ec65d630332c351dbc5ba362",
@@ -446,7 +446,7 @@
       "provider_failover_permitted": true
     },
     {
-      "id": "header-13-extra-token",
+      "id": "malformed-header-19-extra-token",
       "category": "header_syntax",
       "description": "An extra parameter violates the five-token grammar",
       "input_line": "=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=22e2fc27ec65d630332c351dbc5ba362 extra=value",
@@ -456,7 +456,7 @@
       "provider_failover_permitted": true
     },
     {
-      "id": "header-14-reordered-token",
+      "id": "malformed-header-20-reordered-token",
       "category": "header_syntax",
       "description": "Parameter order is canonical and mandatory",
       "input_line": "=yencryption salt=1a2b3c4d5e6f7890abcdef1234567890 cipher=XChaCha20-Poly1305 index=00000001 tag=22e2fc27ec65d630332c351dbc5ba362",
@@ -512,33 +512,7 @@
       "provider_failover_permitted": true
     },
     {
-      "id": "salt-01-dual-salt-mismatch",
-      "category": "salt_mismatch",
-      "description": "Line 1 bootstrap salt does not match =yencryption header salt",
-      "line1_salt_hex": "4b376d5839704c32715238764e34775a",
-      "header_salt_hex": "1a2b3c4d5e6f7890abcdef1234567890",
-      "line1_index": 1,
-      "header_index": 1,
-      "expected_error": "DUAL_SALT_MISMATCH",
-      "zero_output_required": true,
-      "expected_rejection_stage": "PROVIDER_FAILOVER",
-      "provider_failover_permitted": true
-    },
-    {
-      "id": "dual-02-dual-index-mismatch",
-      "category": "salt_mismatch",
-      "description": "Line 1 bootstrap segment index does not match =yencryption header index",
-      "line1_salt_hex": "1a2b3c4d5e6f7890abcdef1234567890",
-      "header_salt_hex": "1a2b3c4d5e6f7890abcdef1234567890",
-      "line1_index": 1,
-      "header_index": 2,
-      "expected_error": "DUAL_INDEX_MISMATCH",
-      "zero_output_required": true,
-      "expected_rejection_stage": "PROVIDER_FAILOVER",
-      "provider_failover_permitted": true
-    },
-    {
-      "id": "header-15-duplicate-token",
+      "id": "malformed-header-21-duplicate-token",
       "category": "header_syntax",
       "description": "Duplicate parameters are rejected",
       "input_line": "=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=22e2fc27ec65d630332c351dbc5ba362 tag=22e2fc27ec65d630332c351dbc5ba362",
@@ -548,7 +522,7 @@
       "provider_failover_permitted": true
     },
     {
-      "id": "header-16-tab-separated",
+      "id": "malformed-header-22-tab-separated",
       "category": "header_syntax",
       "description": "=yencryption header using a tab between tokens instead of a single SP",
       "input_line": "=yencryption\tcipher=XChaCha20-Poly1305\tsalt=1a2b3c4d5e6f7890abcdef1234567890\tindex=00000001\ttag=22e2fc27ec65d630332c351dbc5ba362",
@@ -558,7 +532,7 @@
       "provider_failover_permitted": true
     },
     {
-      "id": "header-17-double-space",
+      "id": "malformed-header-23-double-space",
       "category": "header_syntax",
       "description": "=yencryption header using two consecutive spaces between tokens instead of a single SP",
       "input_line": "=yencryption  cipher=XChaCha20-Poly1305  salt=1a2b3c4d5e6f7890abcdef1234567890  index=00000001  tag=22e2fc27ec65d630332c351dbc5ba362",
@@ -584,6 +558,32 @@
       "expected_rejection_stage": "PROVIDER_FAILOVER",
       "provider_failover_permitted": true,
       "zero_output_required": true
+    },
+    {
+      "id": "malformed-dual-01-dual-salt-mismatch",
+      "category": "salt_mismatch",
+      "description": "Line 1 bootstrap salt does not match =yencryption header salt",
+      "line1_salt_hex": "4b376d5839704c32715238764e34775a",
+      "header_salt_hex": "1a2b3c4d5e6f7890abcdef1234567890",
+      "line1_index": 1,
+      "header_index": 1,
+      "expected_error": "DUAL_SALT_MISMATCH",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "malformed-dual-02-dual-index-mismatch",
+      "category": "salt_mismatch",
+      "description": "Line 1 bootstrap segment index does not match =yencryption header index",
+      "line1_salt_hex": "1a2b3c4d5e6f7890abcdef1234567890",
+      "header_salt_hex": "1a2b3c4d5e6f7890abcdef1234567890",
+      "line1_index": 1,
+      "header_index": 2,
+      "expected_error": "DUAL_INDEX_MISMATCH",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
     }
   ]
 }

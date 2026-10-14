@@ -78,32 +78,22 @@ class SinkFailed(Exception):
     """
 
 
-def _is_yenc_encrypted(article: Article) -> bool:
-    """Whether the article belongs to a yEnc-encrypted release (not merely password-protected)."""
-    try:
-        return bool(article.nzf.nzo.yenc_encrypted)
-    except AttributeError:
-        return False
-
-
 def _get_decryption_adapter(article: Article, password: Optional[str]) -> DecryptionAdapter:
     """Retrieve cached DecryptionAdapter from the parent Nzo or create a new one."""
-    try:
-        nzo = article.nzf.nzo
-        with nzo.lock:
-            adapter = getattr(nzo, "_decryption_adapter", None)
-            if adapter is not None and adapter.password == password:
-                return adapter
-            adapter = DecryptionAdapter(password=password)
-            nzo._decryption_adapter = adapter
+    nzo = article.nzf.nzo
+    with nzo.lock:
+        adapter = getattr(nzo, "_decryption_adapter", None)
+        if adapter is not None and adapter.password == password:
             return adapter
-    except AttributeError:
-        return DecryptionAdapter(password=password)
+        adapter = DecryptionAdapter(password=password)
+        nzo._decryption_adapter = adapter
+        return adapter
 
 
 def decode(article: Article, decoder: sabctools.NNTPResponse):
     decoded_data: Optional[bytearray] = None
     nzo = article.nzf.nzo
+    is_encrypted = bool(nzo.yenc_encrypted)
     art_id = article.article
 
     # Keeping track
@@ -116,7 +106,7 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
         if sabnzbd.LOG_ALL:
             logging.debug("Decoding %s", art_id)
 
-        if _is_yenc_encrypted(article):
+        if is_encrypted:
             decoded_data = decode_yenc(article, decoder)
         elif decoder.format is sabctools.EncodingFormat.UU:
             decoded_data = decode_uu(article, decoder)
@@ -161,6 +151,13 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
         # the queue stops scheduling the job and post-processing records it as
         # FAILED with the fail_msg preserved.
         logging.error(T("Structural yEnc-encryption failure in %s: %s"), art_id, error)
+        # Several articles of one job are normally in flight when the first
+        # structural error aborts it. A second in-flight article failing
+        # structurally must not run the fail-to-history lifecycle again:
+        # PostProcessor.process would re-queue the already-FAILED job for a
+        # second post-processing pass (and re-run it once more in history).
+        if nzo.removed_from_queue:
+            return
         nzo.fail_msg = T("Structural yEnc-encryption failure: missing or invalid metadata")
         nzo.set_unpack_info("Download", nzo.fail_msg)
         # Mark failed so pp_or_finished discards any in-flight articles of this job
@@ -245,7 +242,7 @@ def decode(article: Article, decoder: sabctools.NNTPResponse):
         # Causing the decoder-queue to fill up and delay the downloader
         sabnzbd.ArticleCache.save_article(article, decoded_data)
         article.decoded = True
-    elif not nzo.precheck and (article_success or not _is_yenc_encrypted(article)):
+    elif not nzo.precheck and (article_success or not is_encrypted):
         # Either there was nothing to save, or the decoder streamed it straight to the
         # file. Both are on disk as far as the rest of the pipeline is concerned; the
         # assembler advances past an on_disk article on its own when it next runs.
@@ -280,14 +277,15 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
     # boundary sabctools does not report, and the body must never be found by trial
     # decryption (Body Standard v1.2 section 9). Any other status fails closed as
     # provider failover.
-    if _is_yenc_encrypted(article) and response.status_code != 222:
+    is_encrypted = bool(nzf.nzo.yenc_encrypted)
+    if is_encrypted and response.status_code != 222:
         raise YEncEncryptionCryptoError(
             f"Encrypted article {article.article} answered with status {response.status_code}, not BODY"
         )
 
     # Body Standard v1.2 section 9: reject substitutions before format dispatch,
     # metadata mutation, salvage, or caching. Only encrypted wire lines may proceed.
-    if _is_yenc_encrypted(article) and (
+    if is_encrypted and (
         response.format is sabctools.EncodingFormat.UU or response.bytes_decoded or not response.lines
     ):
         raise YEncEncryptionCryptoError(
@@ -295,10 +293,10 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
         )
 
     # Encrypted wire response: sabctools couldn't decode because control lines were FF1-encrypted
-    if _is_yenc_encrypted(article):
+    if is_encrypted:
         lines = [line.encode("latin-1") if isinstance(line, str) else line for line in response.lines]
 
-        password = getattr(article.nzf.nzo, "password", None)
+        password = nzf.nzo.password
         adapter = _get_decryption_adapter(article, password=password)
 
         # Dot-unstuffing adapter (RFC 3977 §3.1.1 transport boundary). On the encrypted
@@ -380,7 +378,7 @@ def decode_yenc(article: Article, response: sabctools.NNTPResponse) -> Optional[
         article.crc32 = None
         nzf.type = "yenc"
 
-        if not nzf.filename_checked and (file_name := sub_resp.file_name):
+        if not nzf.filename_checked and (file_name := yenc_params.get("file_name")):
             if article.lowest_partnum:
                 nzf.md5of16k = hashlib.md5(memoryview(decoded_data)[:16384]).digest()
             nzf.nzo.verify_nzf_filename(nzf, file_name)

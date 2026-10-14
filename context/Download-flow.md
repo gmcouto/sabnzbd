@@ -24,8 +24,8 @@
    - Successful BODY/ARTICLE (220/222) updates per-server stats; missing/500 variants toggle capability flags (BODY/STAT support).
 
 7. **Decoding and caching**  
-   - `Downloader.decode` hands responses to `decoder.decode`, which yEnc/UU decodes, CRC-checks, and stores payloads in `ArticleCache` (memory or disk spill). For encrypted releases (`yenc_encrypted`), it restores the FF1-encrypted control lines and authenticates/decrypts the ciphertext via XChaCha20-Poly1305 before cache storage; direct-write is disabled for encrypted releases.
-   - Articles with DMCA clues, CRC mismatches, or Poly1305 authentication failures trigger retry on alternate servers until `max_art_tries` is exceeded.
+   - `Downloader.decode` hands responses to `decoder.decode`, which yEnc/UU decodes, CRC-checks, and stores payloads in `ArticleCache` (memory or disk spill).  
+   - Articles with DMCA/bad data trigger retry on other servers until `max_art_tries` is exceeded.
 
 8. **Assembly to files**  
    - `Assembler` worker consumes decoded pieces, writes to the target file, updates CRC, and cleans admin markers. It guards disk space (`diskspace_check`) and schedules direct unpack or PAR2 handling when files finish.

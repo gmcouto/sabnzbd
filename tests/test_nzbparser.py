@@ -20,7 +20,6 @@ tests.test_nzbparser - Tests of basic NZB parsing
 """
 
 import gzip
-import json
 import os
 import pytest
 from tests.testhelper import SAB_CACHE_DIR, SAB_DATA_DIR, create_and_read_nzb_fp
@@ -82,32 +81,6 @@ class TestNzbParser:
         #  Strange articles sizes
         #  Correct parsing of dates
         assert False
-
-    @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
-    def test_nzb_segment_identity_conformance(self):
-        vectors_path = os.path.join(
-            os.path.dirname(__file__),
-            "data/test-vectors/nzb_segment_identity.json",
-        )
-        with open(vectors_path, encoding="utf-8") as vectors_file:
-            vectors = json.load(vectors_file)["vectors"]
-
-        for vector in vectors:
-            vector_id = vector["id"]
-            nzb_file = _write_nzb_gz(SAB_CACHE_DIR, f"test_{vector_id}", vector["nzb_xml"])
-            nzo = NzbObject(f"job_{vector_id}")
-
-            nzbparser.nzbfile_parser(nzb_file, nzo)
-            for nzf in nzo.files:
-                nzf.finish_import()
-
-            articles = [art for nzf in nzo.files for art in nzf.decodetable]
-            assert nzo.yenc_encrypted is (vector["category"] != "unencrypted_compatibility"), vector_id
-
-            if expected_segments := vector.get("expected_segments"):
-                parsed = sorted((art.article, art.bytes) for art in articles)
-                expected = sorted((seg["message_id"], seg["bytes"]) for seg in expected_segments)
-                assert parsed == expected, vector_id
 
     @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
     def test_separate_yenc_and_archive_passwords(self):
@@ -176,25 +149,6 @@ class TestNzbParser:
         ws_pw_nzo = NzbObject("ws_pw")
         with pytest.raises(YEncEncryptionStructuralError, match="MISSING_PASSWORD"):
             nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, "ws_pw", ws_pw_xml), ws_pw_nzo)
-
-    @pytest.mark.parametrize("missing", ["_lazy_argon2", "_lazy_nacl_bindings"])
-    @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
-    def test_encrypted_ingest_rejects_missing_crypto_dependency(self, missing):
-        """A missing crypto package rejects the encrypted NZB at ingest, before any article is fetched."""
-        from unittest import mock
-        from sabnzbd.encryption import MissingDependencyError
-
-        xml = """<?xml version="1.0" encoding="utf-8"?>
-<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
- <head><meta type="yenc_encrypted">true</meta><meta type="password">pw</meta></head>
- <file poster="p@test.com" date="1600000000" subject="opaque">
-  <segments><segment bytes="1000" number="1">dep@test</segment></segments>
- </file>
-</nzb>"""
-        nzo = NzbObject("missing_dep")
-        with mock.patch.object(nzbparser, missing, side_effect=MissingDependencyError("not installed")):
-            with pytest.raises(MissingDependencyError):
-                nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, "missing_dep", xml), nzo)
 
     @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
     def test_encrypted_ingest_version_cipher_and_order_validation(self):

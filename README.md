@@ -48,14 +48,6 @@ python3 tools/make_mo.py
 
 Our many other command line options are explained in depth [here](https://sabnzbd.org/wiki/advanced/command-line-parameters).
 
-## yEnc Body Encryption and Control Line Encryption
-
-SABnzbd can download releases protected by the experimental yEnc body and control-line
-encryption (XChaCha20-Poly1305 with FF1), conforming to the v1.2 draft standards. Encrypted
-NZBs carry `<meta type="yenc_encrypted">true</meta>` and a transport password; downloads
-authenticate each segment before any bytes reach disk and fail over to other servers on
-corruption. This is an experimental wire contract, not a published standard.
-
 ## About Our Repo
 
 The workflow we use, is a simplified form of "GitFlow".

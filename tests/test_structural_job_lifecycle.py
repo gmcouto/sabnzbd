@@ -16,13 +16,13 @@
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 """
-tests.test_structural_job_lifecycle - SB-2 regression tests (OFFLINE, no network).
+tests.test_structural_job_lifecycle - structural yEnc-encryption error lifecycle tests (OFFLINE, no network).
 
-A fatal local structural yEnc-encryption error (missing password, unsupported mode,
-missing crypto dependency) on one article must end the WHOLE job through the existing
-fail-to-history lifecycle: no further articles of the job may be scheduled, and
-in-flight successful articles must not revive the job. Wire/auth failures keep using
-search_new_server/provider failover (tested in test_encryption.py).
+A fatal local structural yEnc-encryption error (missing password, unsupported version/cipher)
+on one article must end the WHOLE job through the existing fail-to-history lifecycle: no
+further articles of the job may be scheduled, and in-flight successful articles must not
+revive the job. Wire/auth failures keep using search_new_server/provider failover
+(tested in test_encryption.py).
 """
 
 from types import SimpleNamespace
@@ -138,6 +138,34 @@ class TestStructuralErrorJobLifecycle:
         # The failed article was never registered as on-disk or cached
         assert not first.on_disk
         assert nzo.bad_articles == 0, "structural path never searches a new server"
+
+    def test_second_inflight_structural_error_does_not_reprocess_job(self, job_env):
+        """Two in-flight articles of one job both hitting a structural error must
+        produce a single PostProcessor.process run: the job leaves the queue on the
+        first failure and later structural errors on in-flight articles must be
+        ignored (job already failed to history)."""
+        nzo = job_env.nzo
+
+        articles = sorted(self._articles(nzo), key=lambda a: a.article)
+        first, second = articles[0], articles[1]
+        for article in (first, second):
+            article.fetcher = sabnzbd.Downloader.servers[0]
+
+        response = mock.MagicMock()
+        response.status_code = 222
+        response.sink_failed = False
+
+        with mock.patch("sabnzbd.decoder.decode_yenc", side_effect=YEncEncryptionStructuralError("MISSING_PASSWORD")):
+            # Both articles were in flight when the first structural error aborted the job
+            decode(first, response)
+            decode(second, response)
+
+        # Only the first failure runs the post-processing lifecycle; the second
+        # structural error on the already-removed job must be a no-op
+        assert sabnzbd.PostProcessor.process.call_count == 1
+        assert nzo.removed_from_queue, "job stays removed"
+        assert nzo.status == Status.FAILED
+        assert not second.on_disk, "second failing article must not be registered"
 
     def test_inflight_success_cannot_revive_failed_job(self, job_env):
         """An article that completes after the structural abort must not send the
