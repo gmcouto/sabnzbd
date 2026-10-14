@@ -166,10 +166,26 @@ def ff1_decrypt_numerals(key: bytes, tweak: bytes, numerals: list[int], radix: i
     return A + B
 
 
+# Local receiver safety limit for a single FF1 control-line ciphertext
+# (Control Lines Standard v1.2 §9 permits local safety limits). FF1 over the
+# 253-byte radix is quadratic in line length, so a hostile oversized control
+# line must be rejected before any numeral conversion or FF1 work. The limit
+# applies to the ciphertext handed to ff1_decrypt: line terminators do not
+# count, and Line 1 supplies its ciphertext after its 20-byte bootstrap
+# prefix has already been stripped, so a first line may carry 8212 content
+# bytes in total. This is not a wire-format limit; conforming control lines
+# (filenames far below 8 KiB) are unaffected.
+_MAX_CONTROL_CIPHERTEXT_BYTES = 8192
+
+
 def ff1_decrypt(key: bytes, tweak: bytes, ciphertext_bytes: bytes, radix: int = 253) -> bytes:
     """Decrypt control line byte string using FF1 over Radix 253 Alphabet."""
     if len(ciphertext_bytes) < 2:
         raise YEncEncryptionCryptoError(f"Line too short: {len(ciphertext_bytes)} bytes (minimum 2)")
+    if len(ciphertext_bytes) > _MAX_CONTROL_CIPHERTEXT_BYTES:
+        raise YEncEncryptionCryptoError(
+            f"Control line ciphertext too large: {len(ciphertext_bytes)} bytes (maximum {_MAX_CONTROL_CIPHERTEXT_BYTES})"
+        )
     numerals = [byte_to_numeral(b) for b in ciphertext_bytes]
     pt_numerals = ff1_decrypt_numerals(key, tweak, numerals, radix)
     return bytes(numeral_to_byte(i) for i in pt_numerals)

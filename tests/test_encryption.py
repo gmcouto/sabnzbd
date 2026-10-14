@@ -2471,3 +2471,497 @@ class TestDeclaredGeometryLengthMismatch:
         else:
             decoded = decoder.decode_yenc(article, resp)
             assert decoded == bytearray(plaintext)
+
+
+class TestFF1ControlLineLengthLimit:
+    """T06 / DL-3: Cap each expensive FF1 control-line operation to 8192 ciphertext bytes.
+
+    Control Lines Standard v1.2 §9 allows local receiver safety limits. FF1 over
+    the 253-byte radix is quadratic in line length, so oversized control lines
+    must be rejected before numeral conversion or FF1 rounds.
+    """
+
+    def test_ff1_decrypt_boundary_8192_and_8193(self, monkeypatch):
+        """Deterministically assert 8192 bytes reaches FF1 primitive and 8193 reaches neither numeral conversion nor FF1."""
+        import sabnzbd.encryption as enc
+
+        key = b"\x01" * 32
+        tweak = b"\x02" * 8
+
+        b2n_calls = 0
+        orig_b2n = enc.byte_to_numeral
+
+        def spy_b2n(b: int) -> int:
+            nonlocal b2n_calls
+            b2n_calls += 1
+            return orig_b2n(b)
+
+        primitive_calls = []
+
+        def mock_ff1_numerals(k: bytes, t: bytes, numerals: list[int], radix: int = 253) -> list[int]:
+            primitive_calls.append((len(numerals), radix))
+            return [0] * len(numerals)
+
+        monkeypatch.setattr(enc, "byte_to_numeral", spy_b2n)
+        monkeypatch.setattr(enc, "ff1_decrypt_numerals", mock_ff1_numerals)
+
+        # 8192 bytes reaches numeral conversion and FF1 primitive
+        ct_8192 = b"x" * 8192
+        res_8192 = enc.ff1_decrypt(key, tweak, ct_8192)
+        assert len(res_8192) == 8192
+        assert b2n_calls == 8192
+        assert len(primitive_calls) == 1
+        assert primitive_calls[0] == (8192, 253)
+
+        # Reset counters
+        b2n_calls = 0
+        primitive_calls.clear()
+
+        # 8193 bytes raises YEncEncryptionCryptoError and reaches NEITHER
+        ct_8193 = b"x" * 8193
+        with pytest.raises(enc.YEncEncryptionCryptoError, match="Control line ciphertext too large"):
+            enc.ff1_decrypt(key, tweak, ct_8193)
+
+        assert b2n_calls == 0, "byte_to_numeral must not be called when ciphertext exceeds 8192 bytes"
+        assert len(primitive_calls) == 0, "ff1_decrypt_numerals must not be called when ciphertext exceeds 8192 bytes"
+
+    @pytest.mark.parametrize(
+        ("position", "multipart"),
+        [
+            ("first_line", False),
+            ("single_part_header", False),
+            ("multipart_header_ypart", True),
+            ("multipart_header_yencryption", True),
+            ("footer", False),
+        ],
+    )
+    def test_restore_control_lines_positions_boundary(self, position, multipart, monkeypatch):
+        """Exercise first line, single/multipart header positions and footer through restoration with valid framing.
+
+        Deterministically asserts that 8192 bytes ciphertext reaches FF1 primitive and 8193 bytes
+        raises YEncEncryptionCryptoError without reaching numeral conversion or FF1.
+        First-line content limit is 8212 bytes (20B bootstrap + 8192B ciphertext); terminators and
+        bootstrap do not count toward the 8192-byte limit.
+        """
+        import sabnzbd.encryption as enc
+
+        adapter = enc.DecryptionAdapter(password="testpass")
+        salt = bytes.fromhex("1a2b3c4d5e6f7890abcdef1234567890")
+        seg = 1
+        master_key = adapter.get_master_key(salt)
+
+        k1, t1 = adapter.derive_control_keys(master_key, seg, 1)
+        k2, t2 = adapter.derive_control_keys(master_key, seg, 2)
+        k3, t3 = adapter.derive_control_keys(master_key, seg, 3)
+
+        if multipart:
+            k_footer, t_footer = adapter.derive_control_keys(master_key, seg, 5)
+            std_lines = {
+                "line1": ff1_encrypt(k1, t1, b"=ybegin part=1 total=2 line=128 size=200 name=test.bin"),
+                "line2": ff1_encrypt(k2, t2, b"=ypart begin=1 end=100"),
+                "line3": ff1_encrypt(
+                    k3,
+                    t3,
+                    b"=yencryption cipher=XChaCha20-Poly1305 salt="
+                    + salt.hex().encode("ascii")
+                    + f" index={seg:08x} tag={'00'*16}".encode("ascii"),
+                ),
+                "data": b"DATA LINE NOT TOUCHED",
+                "footer": ff1_encrypt(k_footer, t_footer, b"=yend size=200 part=1 pcrc32=12345678"),
+            }
+        else:
+            k_footer, t_footer = adapter.derive_control_keys(master_key, seg, 4)
+            std_lines = {
+                "line1": ff1_encrypt(k1, t1, b"=ybegin line=128 size=100 name=test.bin"),
+                "line2": ff1_encrypt(
+                    k2,
+                    t2,
+                    b"=yencryption cipher=XChaCha20-Poly1305 salt="
+                    + salt.hex().encode("ascii")
+                    + f" index={seg:08x} tag={'00'*16}".encode("ascii"),
+                ),
+                "data": b"DATA LINE NOT TOUCHED",
+                "footer": ff1_encrypt(k_footer, t_footer, b"=yend size=100 crc32=12345678"),
+            }
+
+        def build_wire(ct_len: int) -> bytes:
+            payload = b"x" * ct_len
+            if position == "first_line":
+                l1 = salt + seg.to_bytes(4, "big") + payload
+                l2 = std_lines["line2"]
+                l3 = std_lines["line3"] if multipart else std_lines["data"]
+                l4 = std_lines["data"] if multipart else std_lines["footer"]
+                lines = [l1, l2, l3, l4] + ([std_lines["footer"]] if multipart else [])
+            elif position == "single_part_header":
+                l1 = salt + seg.to_bytes(4, "big") + std_lines["line1"]
+                lines = [l1, payload, std_lines["data"], std_lines["footer"]]
+            elif position == "multipart_header_ypart":
+                l1 = salt + seg.to_bytes(4, "big") + std_lines["line1"]
+                lines = [l1, payload, std_lines["line3"], std_lines["data"], std_lines["footer"]]
+            elif position == "multipart_header_yencryption":
+                l1 = salt + seg.to_bytes(4, "big") + std_lines["line1"]
+                lines = [l1, std_lines["line2"], payload, std_lines["data"], std_lines["footer"]]
+            elif position == "footer":
+                l1 = salt + seg.to_bytes(4, "big") + std_lines["line1"]
+                if multipart:
+                    lines = [l1, std_lines["line2"], std_lines["line3"], std_lines["data"], payload]
+                else:
+                    lines = [l1, std_lines["line2"], std_lines["data"], payload]
+            else:
+                raise ValueError(f"Unknown position: {position}")
+
+            return b"\r\n".join(lines) + b"\r\n"
+
+        ff1_primitive_calls = []
+        orig_ff1_numerals = enc.ff1_decrypt_numerals
+
+        def mock_ff1_numerals(k: bytes, t: bytes, numerals: list[int], radix: int = 253) -> list[int]:
+            if len(numerals) == 8192:
+                ff1_primitive_calls.append(len(numerals))
+                if position == "first_line":
+                    prefix = (
+                        b"=ybegin part=1 total=2 line=128 size=200 name=test.bin"
+                        if multipart
+                        else b"=ybegin line=128 size=100 name=test.bin"
+                    )
+                elif position in ("single_part_header", "multipart_header_yencryption"):
+                    prefix = (
+                        b"=yencryption cipher=XChaCha20-Poly1305 salt="
+                        + salt.hex().encode("ascii")
+                        + f" index={seg:08x} tag={'00'*16}".encode("ascii")
+                    )
+                elif position == "multipart_header_ypart":
+                    prefix = b"=ypart begin=1 end=100"
+                elif position == "footer":
+                    prefix = b"=yend size=200 part=1 pcrc32=12345678" if multipart else b"=yend size=100 crc32=12345678"
+                else:
+                    prefix = b"=yline"
+                prefix_nums = [enc.byte_to_numeral(b) for b in prefix]
+                pad = [enc.byte_to_numeral(ord(" "))] * (len(numerals) - len(prefix_nums))
+                return prefix_nums + pad
+            return orig_ff1_numerals(k, t, numerals, radix)
+
+        monkeypatch.setattr(enc, "ff1_decrypt_numerals", mock_ff1_numerals)
+
+        # 1. 8192 bytes reaches FF1 primitive
+        wire_8192 = build_wire(8192)
+        _restored, out_salt, out_idx = adapter.restore_control_lines(wire_8192)
+        assert out_salt == salt
+        assert out_idx == seg
+        assert 8192 in ff1_primitive_calls
+
+        # 2. 8193 bytes raises YEncEncryptionCryptoError and reaches neither conversion nor primitive
+        wire_8193 = build_wire(8193)
+        with pytest.raises(enc.YEncEncryptionCryptoError, match="Control line ciphertext too large"):
+            adapter.restore_control_lines(wire_8193)
+
+        assert 8193 not in ff1_primitive_calls, "8193 bytes must not reach ff1_decrypt_numerals"
+
+    def test_first_line_total_content_limit_8212_bytes(self, monkeypatch):
+        """First line content limit is exactly 8212 bytes (20B bootstrap + 8192B ciphertext).
+
+        Bootstrap prefix and CRLF terminators do not count toward the 8192-byte limit.
+        """
+        import sabnzbd.encryption as enc
+
+        adapter = enc.DecryptionAdapter(password="testpass")
+        salt = bytes.fromhex("1a2b3c4d5e6f7890abcdef1234567890")
+        seg = 1
+        master_key = adapter.get_master_key(salt)
+
+        k2, t2 = adapter.derive_control_keys(master_key, seg, 2)
+        k4, t4 = adapter.derive_control_keys(master_key, seg, 4)
+
+        wire_line2 = (
+            ff1_encrypt(
+                k2,
+                t2,
+                b"=yencryption cipher=XChaCha20-Poly1305 salt="
+                + salt.hex().encode("ascii")
+                + f" index={seg:08x} tag={'00'*16}".encode("ascii"),
+            )
+            + b"\r\n"
+        )
+        wire_data = b"DATA LINE\r\n"
+        wire_footer = ff1_encrypt(k4, t4, b"=yend size=100 crc32=12345678") + b"\r\n"
+
+        primitive_called_lengths = []
+        orig_ff1_numerals = enc.ff1_decrypt_numerals
+
+        def mock_ff1_numerals(k: bytes, t: bytes, numerals: list[int], radix: int = 253) -> list[int]:
+            primitive_called_lengths.append(len(numerals))
+            if len(numerals) == 8192:
+                prefix = b"=ybegin line=128 size=100 name=test.bin"
+                prefix_nums = [enc.byte_to_numeral(b) for b in prefix]
+                pad = [enc.byte_to_numeral(ord(" "))] * (len(numerals) - len(prefix_nums))
+                return prefix_nums + pad
+            return orig_ff1_numerals(k, t, numerals, radix)
+
+        b2n_calls = 0
+        orig_b2n = enc.byte_to_numeral
+
+        def spy_b2n(b: int) -> int:
+            nonlocal b2n_calls
+            b2n_calls += 1
+            return orig_b2n(b)
+
+        # 8212 content bytes (20B bootstrap + 8192B ciphertext) + 2B CRLF = 8214 bytes line
+        ct_8192 = b"x" * 8192
+        line1_content_8212 = salt + seg.to_bytes(4, "big") + ct_8192
+        assert len(line1_content_8212) == 8212
+        wire_8212 = line1_content_8212 + b"\r\n" + wire_line2 + wire_data + wire_footer
+
+        monkeypatch.setattr(enc, "ff1_decrypt_numerals", mock_ff1_numerals)
+        monkeypatch.setattr(enc, "byte_to_numeral", spy_b2n)
+
+        _restored, out_salt, out_idx = adapter.restore_control_lines(wire_8212)
+        assert 8192 in primitive_called_lengths
+        assert b2n_calls >= 8192
+        assert out_salt == salt
+        assert out_idx == seg
+
+        # 8213 content bytes (20B bootstrap + 8193B ciphertext) + 2B CRLF = 8215 bytes line
+        primitive_called_lengths.clear()
+        b2n_calls = 0
+
+        ct_8193 = b"x" * 8193
+        line1_content_8213 = salt + seg.to_bytes(4, "big") + ct_8193
+        assert len(line1_content_8213) == 8213
+        wire_8213 = line1_content_8213 + b"\r\n" + wire_line2 + wire_data + wire_footer
+
+        with pytest.raises(enc.YEncEncryptionCryptoError, match="Control line ciphertext too large: 8193 bytes"):
+            adapter.restore_control_lines(wire_8213)
+
+        assert b2n_calls == 0, "No numeral conversion for 8193-byte line"
+        assert len(primitive_called_lengths) == 0, "No FF1 primitive call for 8193-byte line"
+
+    def test_oversized_control_line_decoder_retry_seam(self):
+        """Oversized control line (>8192 bytes) raises YEncEncryptionCryptoError, is treated as provider
+        corruption by decoder.decode(), triggers server retry, and releases no cache or disk output."""
+        import sabnzbd.decoder as decoder
+
+        password = "test_password_failover"
+        salt = bytes.fromhex("1a2b3c4d5e6f7890abcdef1234567890")
+        segment_index = 1
+        plaintext = b"Authenticated plaintext from good backup server!"
+
+        # Server 1 response: oversized Line 1 ciphertext (8193 bytes)
+        line1_oversized = salt + segment_index.to_bytes(4, "big") + (b"x" * 8193)
+        oversized_resp = _mock_response()
+        oversized_resp.sink_failed = False
+        oversized_resp.status_code = 222
+        oversized_resp.bytes_decoded = 0
+        oversized_resp.lines = [
+            line1_oversized.decode("latin-1"),
+            "line2",
+            "body",
+            "line4",
+        ]
+
+        # Server 2 response: valid encrypted article
+        good_body, _ad, _mk, _nonce, _ct, _tag, _crc, _aad, _n = _encrypted_wire(
+            password=password,
+            plaintext=plaintext,
+            name="test.bin",
+            salt=salt,
+            segment_index=segment_index,
+        )
+        good_resp = _mock_response()
+        good_resp.sink_failed = False
+        good_resp.status_code = 222
+        good_resp.bytes_decoded = 0
+        good_resp.lines = [line.decode("latin-1") for line in good_body.split(b"\r\n") if line]
+
+        # Mock article
+        article = mock.MagicMock(spec=Article)
+        article.article = "oversized-art@test"
+        article.nzf.nzo.password = password
+        article.nzf.nzo.yenc_encrypted = True
+        article.nzf.nzo.precheck = False
+        article.nzf.filename_checked = True
+        article.lowest_partnum = False
+        article.on_disk = False
+        article.search_new_server.return_value = True
+
+        # 1. Assert decode_yenc directly raises YEncEncryptionCryptoError on oversized response
+        with pytest.raises(YEncEncryptionCryptoError, match="Control line ciphertext too large"):
+            decoder.decode_yenc(article, oversized_resp)
+
+        # 2. Assert decode() treats it as provider corruption (retries backup, zero output)
+        mock_cache = mock.MagicMock()
+        mock_queue = mock.MagicMock()
+        with (
+            mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
+            mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
+        ):
+            # Attempt 1 (bad server with oversized control line):
+            decoder.decode(article, oversized_resp)
+
+            # Assert treated as provider corruption: retries backup server
+            assert article.search_new_server.called, "Must trigger search_new_server for provider failover"
+            # Assert zero output released from rejected attempt
+            assert not mock_cache.save_article.called, "No cache output must be released from rejected attempt"
+            assert not article.on_disk, "No disk output must be released from rejected attempt"
+
+            # Attempt 2 (backup server succeeds with authenticated plaintext)
+            mock_cache.reset_mock()
+            article.search_new_server.reset_mock()
+
+            decoder.decode(article, good_resp)
+            assert mock_cache.save_article.called, "Backup server must save authenticated plaintext"
+            _saved_art, saved_data = mock_cache.save_article.call_args[0]
+            assert bytes(saved_data) == plaintext
+
+    def test_oversized_control_line_downloader_dual_server_failover(self, caplog):
+        """Dual-server failover: Server 1 delivers an oversized control line, is rejected as provider
+        corruption, retries backup Server 2, and releases no cache or disk output from the rejected attempt."""
+        password = "multi_server_oversized_pass"
+        plaintext = b"Authenticated payload from backup server after oversized rejection!"
+
+        valid_body, _adapter, _master_key, _nonce, _ct, _tag, _crc, _aad, _n = _encrypted_wire(
+            password=password,
+            plaintext=plaintext,
+            name="test.bin",
+        )
+
+        salt = bytes.fromhex("1a2b3c4d5e6f7890abcdef1234567890")
+        seg_idx = 1
+        oversized_wire = (
+            salt + seg_idx.to_bytes(4, "big") + (b"x" * 8193) + b"\r\n" + b"xx\r\n" + b"data\r\n" + b"yy\r\n"
+        )
+
+        srv1 = MockArticleNNTPServer(oversized_wire)
+        srv1.start()
+        srv2 = MockArticleNNTPServer(valid_body)
+        srv2.start()
+
+        try:
+            s1 = Server(
+                server_id="srv_oversized",
+                displayname="Primary Bad Server",
+                host=srv1.host,
+                port=srv1.port,
+                timeout=5,
+                threads=0,
+                priority=0,
+                use_ssl=False,
+                ssl_verify=0,
+                ssl_ciphers="",
+                pipelining_requests=mock.Mock(return_value=1),
+            )
+            s1.addrinfo = AddrInfo(*socket.getaddrinfo(srv1.host, srv1.port, socket.AF_INET, socket.SOCK_STREAM)[0])
+            s1.active = True
+
+            s2 = Server(
+                server_id="srv_good",
+                displayname="Backup Good Server",
+                host=srv2.host,
+                port=srv2.port,
+                timeout=5,
+                threads=0,
+                priority=1,
+                use_ssl=False,
+                ssl_verify=0,
+                ssl_ciphers="",
+                pipelining_requests=mock.Mock(return_value=1),
+            )
+            s2.addrinfo = AddrInfo(*socket.getaddrinfo(srv2.host, srv2.port, socket.AF_INET, socket.SOCK_STREAM)[0])
+            s2.active = True
+
+            mock_downloader = mock.MagicMock(spec=Downloader)
+            mock_downloader.servers = [s1, s2]
+            mock_downloader.reset_nw = lambda nw, *args, **kwargs: None
+            mock_downloader.finish_connect_nw = lambda nw, resp: Downloader.finish_connect_nw(mock_downloader, nw, resp)
+            mock_downloader.decode = lambda article, resp: Downloader.decode(article, resp)
+            mock_downloader.modify_socket = lambda nw, event: None
+            mock_downloader.remove_socket = lambda nw: None
+            mock_downloader.no_active_jobs = lambda: False
+            mock_downloader.shutdown = False
+            mock_downloader.paused_for_postproc = False
+            mock_downloader.force_disconnect = False
+
+            mock_bps = mock.MagicMock()
+            mock_cache = mock.MagicMock()
+            mock_queue = mock.MagicMock()
+
+            mock_nzo = mock.MagicMock()
+            mock_nzo.password = password
+            mock_nzo.yenc_encrypted = True
+            mock_nzo.precheck = False
+            mock_nzo.removed_from_queue = False
+            mock_nzo.status = "active"
+            mock_nzo.priority = 0
+            mock_nzo.update_download_stats = mock.MagicMock()
+
+            mock_nzf = mock.MagicMock()
+            mock_nzf.nzo = mock_nzo
+            mock_nzf.filename_checked = True
+            mock_nzf.type = "yenc"
+
+            art = Article("art@oversized", 100, mock_nzf)
+            art.lowest_partnum = False
+            art.on_disk = False
+            art.tries = 0
+
+            with (
+                mock.patch.object(sabnzbd, "Downloader", mock_downloader, create=True),
+                mock.patch.object(sabnzbd, "BPSMeter", mock_bps, create=True),
+                mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
+                mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
+            ):
+                # 1. Connect NW1 to Server 1 (oversized article)
+                nw1 = NewsWrapper(s1, thrdnum=1)
+                s1.idle_threads.add(nw1)
+                nw1.init_connect()
+                for _ in range(50):
+                    if nw1.connected:
+                        break
+                    time.sleep(0.05)
+                nw1.nntp.sock.setblocking(True)
+                nw1.nntp.sock.settimeout(2)
+                nw1.read()
+                assert nw1.ready
+
+                # Request article from Server 1
+                art.fetcher = s1
+                nw1.queue_article(art)
+                nw1.write()
+                nw1.read()
+
+                # Server 1 must fail with provider failover
+                assert s1 in art.try_list
+                assert mock_bps.register_server_article_failed.called
+                assert not mock_cache.save_article.called, "Zero-output: cache save must not be called"
+                assert not art.on_disk, "Zero-output: article must not be marked on_disk"
+                assert not mock_nzo.increase_bad_articles_counter.called
+
+                # 2. Connect NW2 to Server 2 (valid article)
+                nw2 = NewsWrapper(s2, thrdnum=1)
+                s2.idle_threads.add(nw2)
+                nw2.init_connect()
+                for _ in range(50):
+                    if nw2.connected:
+                        break
+                    time.sleep(0.05)
+                nw2.nntp.sock.setblocking(True)
+                nw2.nntp.sock.settimeout(2)
+                nw2.read()
+                assert nw2.ready
+
+                # Request article from Server 2
+                art.fetcher = s2
+                nw2.queue_article(art)
+                nw2.write()
+                nw2.read()
+
+                # Server 2 must succeed and save authenticated plaintext
+                assert mock_cache.save_article.called
+                _saved_art, saved_data = mock_cache.save_article.call_args[0]
+                assert bytes(saved_data) == plaintext
+
+            log_text = caplog.text
+            assert "Control line ciphertext too large" in log_text
+
+        finally:
+            srv1.stop()
+            srv2.stop()
