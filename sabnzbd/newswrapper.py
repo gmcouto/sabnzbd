@@ -51,6 +51,164 @@ def _requires_body(article: "sabnzbd.nzb.Article") -> bool:
     return bool(article.nzf.nzo.yenc_encrypted)
 
 
+def _captures_body(article: "sabnzbd.nzb.Article") -> bool:
+    """Whether this article's raw BODY bytes must be journaled.
+
+    This is exactly the arming condition used before a BODY command goes out; every
+    journal bound added (arm) must be retired with the same predicate (release), so
+    plain or precheck articles on a shared connection never decrement another
+    in-flight encrypted article's bound.
+    """
+    return _requires_body(article) and not article.nzf.nzo.precheck
+
+
+class _RawBodyCapture:
+    """Journal of raw transport bytes for declared-encrypted articles.
+
+    sabctools' native Decoder has no raw mode and auto-detects ordinary yEnc from the
+    wire bytes. A valid encrypted Line 1 can begin with salt bytes that look exactly
+    like an ordinary "=ybegin " bootstrap, in which case sabctools consumes the whole
+    article into bogus decoded data and exposes no raw lines - the article is lost
+    before the restoration pipeline ever sees it (DL-R7-2). While an encrypted article
+    is in flight, every byte handed to the native Decoder is journaled here so the raw
+    body can be reconstructed per response.
+
+    Only articles of a declared-encrypted job journal (encrypted-only), with an
+    enforced per-article byte bound: a bound trip drops the journal and later slices
+    come back empty, which fails the encrypted article closed - never wrong output.
+    """
+
+    __slots__ = ("_chunks", "_retained", "_bound", "_dropped")
+
+    def __init__(self):
+        self._chunks: list[bytes] = []
+        self._retained = 0
+        self._bound = 0
+        self._dropped = False
+
+    @property
+    def active(self) -> bool:
+        return bool(self._bound)
+
+    @property
+    def retained(self) -> int:
+        return self._retained
+
+    @staticmethod
+    def _article_bound(article: "sabnzbd.nzb.Article") -> int:
+        """Enforced per-article journal bound.
+
+        The raw response is the yEnc-encoded ciphertext plus control lines, status line
+        and terminator: always larger than the NZB's declared plaintext article size,
+        but by a bounded factor (yEnc escapes at most 1/51 bytes, one =yencryption line,
+        AEAD tag). The margin covers that expansion; anything beyond it is not a valid
+        article and trips the bound.
+        """
+        declared = article.bytes
+        return declared + (declared >> 5) + 4096
+
+    def arm(self, article: "sabnzbd.nzb.Article") -> None:
+        """Arm the journal for an encrypted article being requested.
+
+        Pipelined requests each add their own bound while in flight; the journal is
+        shared and consumed FIFO per response, so arming never discards another
+        in-flight article's bytes.
+        """
+        self._bound += self._article_bound(article)
+
+    def release(self, article: "sabnzbd.nzb.Article") -> None:
+        """Retire one completed article's bound contribution; full release frees storage."""
+        self._bound = max(0, self._bound - self._article_bound(article))
+        if not self._bound:
+            self._chunks.clear()
+            self._retained = 0
+            self._dropped = False
+
+    def set_inactive(self) -> None:
+        """Release all storage; used on connection reset."""
+        self._chunks.clear()
+        self._retained = 0
+        self._bound = 0
+        self._dropped = False
+
+    def add(self, chunk: bytes, /) -> None:
+        """Journal one normalized transport chunk (called on the process() seam)."""
+        if not self._bound or self._dropped:
+            return
+        self._retained += len(chunk)
+        if self._retained > self._bound:
+            # Bound trip: drop instead of growing; take() then yields nothing and the
+            # article fails closed through the ordinary encrypted guard.
+            self._chunks.clear()
+            self._retained = 0
+            self._dropped = True
+            return
+        self._chunks.append(bytes(chunk))
+
+    def take(self, nbytes: int) -> Optional[bytes]:
+        """Return the next nbytes journaled bytes (one response slice), or None."""
+        if not nbytes or self._dropped or self._retained < nbytes:
+            return None
+        out = bytearray()
+        remaining = nbytes
+        while remaining:
+            chunk = self._chunks[0]
+            if len(chunk) <= remaining:
+                out += chunk
+                remaining -= len(chunk)
+                self._chunks.pop(0)
+            else:
+                out += chunk[:remaining]
+                self._chunks[0] = chunk[remaining:]
+                remaining = 0
+        self._retained -= nbytes
+        return bytes(out)
+
+
+class _RawLinesResponse:
+    """Duck-typed carrier that presents reconstructed raw wire lines to the decoder.
+
+    Wraps the real sabctools NNTPResponse and overrides only the fields that native
+    auto-detection made untrustworthy for an encrypted article: lines carries the raw
+    body lines, bytes_decoded is 0 (the bogus native output is not authenticated
+    content) and format is None. Everything else delegates to the real response, and
+    no plaintext exists until decode_yenc's restoration and authentication succeed.
+    """
+
+    __slots__ = ("_response", "_raw_lines")
+
+    def __init__(self, response: sabctools.NNTPResponse, raw_lines: list[bytes]):
+        self._response = response
+        self._raw_lines = raw_lines
+
+    @property
+    def lines(self) -> list[bytes]:
+        return self._raw_lines
+
+    @property
+    def bytes_decoded(self) -> int:
+        return 0
+
+    @property
+    def format(self):
+        return None
+
+    def __getattr__(self, name: str):
+        return getattr(self._response, name)
+
+
+def _raw_body_lines(raw: bytes) -> list[bytes]:
+    """Split a raw BODY response into its body lines.
+
+    raw covers exactly one response (status line, body lines, "." terminator, CRLFs),
+    already normalized to CRLF framing by NewsWrapper. The status line and the
+    terminator are transport framing owned by sabctools, not article content.
+    """
+    elements = raw.split(b"\r\n")
+    # Drop the status line, the "." terminator and the element after the final CRLF.
+    return elements[1:-2]
+
+
 class NNTPPermanentError(Exception):
     def __init__(self, msg: str, code: int):
         super().__init__()
@@ -85,6 +243,7 @@ class NewsWrapper:
         "generation",
         "tls_wants_write",
         "_prev_chunk_ended_with_cr",
+        "raw_capture",
     )
 
     def __init__(self, server: "sabnzbd.downloader.Server", thrdnum: int, block: bool = False, generation: int = 0):
@@ -121,6 +280,11 @@ class NewsWrapper:
         # Whether the previous TCP chunk's last byte was an unpaired '\r'. A '\n' arriving
         # at the start of the next chunk is then the second half of a CRLF, not a bare LF.
         self._prev_chunk_ended_with_cr: bool = False
+
+        # Raw byte journal for declared-encrypted articles (see _RawBodyCapture). Armed
+        # per request in write() when the outgoing command fetches an encrypted article;
+        # inactive otherwise, so ordinary traffic never journals.
+        self.raw_capture: Optional[_RawBodyCapture] = _RawBodyCapture()
 
     @property
     def article(self) -> Optional["sabnzbd.nzb.Article"]:
@@ -264,6 +428,44 @@ class NewsWrapper:
         else:
             command = utob("ARTICLE <%s>\r\n" % article.article)
         self.queue_command(command, article)
+
+    def _with_raw_lines(
+        self, article: Optional["sabnzbd.nzb.Article"], response: sabctools.NNTPResponse
+    ) -> sabctools.NNTPResponse:
+        """Reconstruct raw wire lines for an encrypted article native auto-detection consumed.
+
+        When sabctools recognized the raw bootstrap as ordinary yEnc (a valid encrypted
+        Line 1 salt can look exactly like "=ybegin "), the article bytes are lost from
+        response.lines: only bogus decoded data remains. For declared-encrypted articles
+        whose raw bytes were journaled, the raw body lines are sliced out and presented
+        to the decoder through a read-only carrier. The journal is consumed FIFO per
+        response (bytes_read partitions the consumed stream exactly), so every response
+        received while the journal is active consumes its own slice to keep later
+        responses aligned; slices for non-article or non-encrypted responses are
+        discarded. The real response object is returned unchanged whenever
+        reconstruction is not possible, and the native decoded data is never accepted
+        as authenticated content - decode_yenc's restoration/authentication still
+        decides, and a missing slice fails closed through the existing guard.
+        """
+        raw_capture = self.raw_capture
+        raw: Optional[bytes] = None
+        if raw_capture is not None and raw_capture.active and response.bytes_read:
+            raw = raw_capture.take(response.bytes_read)
+            if article is not None and _captures_body(article):
+                raw_capture.release(article)
+
+        if article is None or not _requires_body(article):
+            return response
+        if response.lines or response.status_code != 222 or not raw:
+            # Lines present (encrypted wire not autodetected): nothing to reconstruct.
+            # Non-BODY statuses are transport bookkeeping, not an article. A missing
+            # slice (bound tripped) leaves the real response, whose bogus native output
+            # the existing guard rejects closed.
+            return response
+        raw_lines = _raw_body_lines(raw)
+        if not raw_lines:
+            return response
+        return _RawLinesResponse(response, raw_lines)
 
     def on_response(self, response: sabctools.NNTPResponse, article: Optional["sabnzbd.nzb.Article"]) -> None:
         """A response to a NNTP request is received"""
@@ -413,6 +615,14 @@ class NewsWrapper:
                 mv[: len(norm_chunk)] = norm_chunk
                 bytes_recv = len(norm_chunk)
 
+        # Raw byte journal for declared-encrypted articles: every normalized byte handed
+        # to the native Decoder is journaled so an article consumed by native yEnc
+        # auto-detection can still be reconstructed from raw bytes (DL-R7-2). Bound to
+        # the declared article size; ordinary releases never arm the journal.
+        raw_capture = self.raw_capture
+        if raw_capture is not None and raw_capture.active:
+            raw_capture.add(memoryview(self.decoder)[:bytes_recv])
+
         self.decoder.process(bytes_recv)
         if self.decoder:
             for response in self.decoder:
@@ -423,7 +633,7 @@ class NewsWrapper:
                 article = response.context
                 if on_response:
                     on_response(response.status_code, response.message)
-                self.on_response(response, article)
+                self.on_response(self._with_raw_lines(article, response), article)
 
             # on_response may have reset the connection
             if self.generation != generation:
@@ -533,6 +743,14 @@ class NewsWrapper:
                     if sabnzbd.LOG_ALL:
                         logging.debug("Thread %s@%s: %s", self.thrdnum, server.host, command)
 
+                    # Arm the encrypted raw journal for this article before the command
+                    # goes out, so the bytes of its response are journaled FIFO. Precheck
+                    # STAT/HEAD answers carry no article body and never journal.
+                    if article is not None and _captures_body(article):
+                        if self.raw_capture is None:
+                            self.raw_capture = _RawBodyCapture()
+                        self.raw_capture.arm(article)
+
                     # Non-blocking send - buffer any unsent data
                     sent = self.nntp.sock.send(command)
                     if sent < len(command):
@@ -568,6 +786,10 @@ class NewsWrapper:
     def hard_reset(self, wait: bool = True):
         """Destroy and restart"""
         with self.lock:
+            # Release any encrypted raw journal storage before the wrapper is rebuilt
+            if self.raw_capture is not None:
+                self.raw_capture.set_inactive()
+
             # Drain unsent requests
             if self.next_request:
                 _, article = self.next_request
@@ -604,6 +826,9 @@ class NewsWrapper:
     ) -> None:
         """Discard an article back to the queue"""
         if article:
+            # Retire this article's encrypted raw journal bound; the fetch will re-arm
+            if self.raw_capture is not None and _captures_body(article):
+                self.raw_capture.release(article)
             # The job might return to the queue in the future so clear the current server
             if article.nzf.nzo.removed_from_queue:
                 article.allow_new_fetcher()

@@ -1483,6 +1483,651 @@ class TestDirectWriteGatingAndFailover:
             srv.stop()
 
 
+def _transport_server_and_article(enc_body: bytes, password: str, split_at=None):
+    """Real NewsWrapper + real sabctools Decoder against a mock NNTP server.
+
+    Returns (server, server_config, article, mocks) wired exactly like the framing
+    tests above: blocking sockets, mocked Downloader services.
+    """
+    srv = MockArticleNNTPServer(enc_body, split_at=split_at)
+    srv.start()
+
+    s1 = Server(
+        server_id="srv_raw",
+        displayname="Raw Capture Server",
+        host=srv.host,
+        port=srv.port,
+        timeout=5,
+        threads=0,
+        priority=0,
+        use_ssl=False,
+        ssl_verify=0,
+        ssl_ciphers="",
+        pipelining_requests=mock.Mock(return_value=2),
+    )
+    s1.addrinfo = AddrInfo(*socket.getaddrinfo(srv.host, srv.port, socket.AF_INET, socket.SOCK_STREAM)[0])
+    s1.active = True
+
+    mock_downloader = mock.MagicMock(spec=Downloader)
+    mock_downloader.servers = [s1]
+    mock_downloader.reset_nw = lambda nw, *args, **kwargs: None
+    mock_downloader.finish_connect_nw = lambda nw, resp: Downloader.finish_connect_nw(mock_downloader, nw, resp)
+    mock_downloader.decode = lambda article, resp: Downloader.decode(article, resp)
+    mock_downloader.modify_socket = lambda nw, event: None
+    mock_downloader.remove_socket = lambda nw: None
+    mock_downloader.no_active_jobs = lambda: False
+    mock_downloader.shutdown = False
+    mock_downloader.paused_for_postproc = False
+    mock_downloader.force_disconnect = False
+
+    mock_bps = mock.MagicMock()
+    mock_cache = mock.MagicMock()
+    mock_queue = mock.MagicMock()
+
+    mock_nzo = mock.MagicMock()
+    mock_nzo.password = password
+    mock_nzo.yenc_encrypted = True
+    mock_nzo.precheck = False
+    mock_nzo.removed_from_queue = False
+    mock_nzo.status = "active"
+    mock_nzo.priority = 0
+    mock_nzo.update_download_stats = mock.MagicMock()
+
+    mock_nzf = mock.MagicMock()
+    mock_nzf.nzo = mock_nzo
+    mock_nzf.filename_checked = True
+    mock_nzf.type = "yenc"
+
+    art = Article("art@e2e", 100, mock_nzf)
+    art.lowest_partnum = False
+    art.on_disk = False
+    art.tries = 0
+
+    return srv, s1, art, mock_downloader, mock_bps, mock_cache, mock_queue
+
+
+def _connect_and_fetch(nw, s1, art):
+    """Blocking connect, welcome read, then queue/write/read one article."""
+    nw.nntp.sock.setblocking(True)
+    nw.nntp.sock.settimeout(2)
+    nw.read()
+    assert nw.ready
+    art.fetcher = s1
+    nw.queue_article(art)
+    nw.write()
+    nw.read()
+
+
+class _PipelinedNNTPServer(MockArticleNNTPServer):
+    """MockArticleNNTPServer that answers each command line separately, so two
+    pipelined BODY commands produce two responses in the wire stream."""
+
+    def _handle_client(self, conn):
+        try:
+            conn.sendall(b"200 Welcome\r\n")
+            while not self._stop.is_set():
+                conn.settimeout(0.5)
+                try:
+                    data = conn.recv(1024)
+                except TimeoutError:
+                    continue
+                if not data:
+                    break
+                if data.startswith(b"QUIT"):
+                    break
+                for command in data.split(b"\r\n"):
+                    if command.startswith(b"BODY"):
+                        self.commands.append(command)
+                        conn.sendall(b"222 0 <art@e2e>\r\n" + self.body_bytes + b".\r\n")
+        except Exception:
+            pass
+        finally:
+            conn.close()
+
+
+class _MixedPipelinedNNTPServer:
+    """NNTP server that answers each pipelined BODY command with the per-Message-ID body."""
+
+    def __init__(self, bodies: dict):
+        self.host = "127.0.0.1"
+        self.port = 0
+        self.server_socket = None
+        self._stop = threading.Event()
+        self._thread = None
+        self.bodies = bodies  # msgid (without <>) -> response body bytes
+        self.commands = []
+
+    def start(self):
+        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.server_socket.bind((self.host, self.port))
+        self.port = self.server_socket.getsockname()[1]
+        self.server_socket.listen(5)
+        self.server_socket.settimeout(0.5)
+        self._thread = threading.Thread(target=self._accept_loop, daemon=True)
+        self._thread.start()
+
+    def _accept_loop(self):
+        while not self._stop.is_set():
+            try:
+                conn, _addr = self.server_socket.accept()
+                threading.Thread(target=self._handle_client, args=(conn,), daemon=True).start()
+            except OSError:
+                pass
+
+    def _handle_client(self, conn):
+        try:
+            conn.sendall(b"200 Welcome\r\n")
+            while not self._stop.is_set():
+                conn.settimeout(0.5)
+                try:
+                    data = conn.recv(4096)
+                except TimeoutError:
+                    continue
+                if not data:
+                    break
+                if data.startswith(b"QUIT"):
+                    break
+                for command in data.split(b"\r\n"):
+                    if command.startswith(b"BODY"):
+                        self.commands.append(command)
+                        msgid = command[len(b"BODY <") : -1].decode()
+                        body = self.bodies[msgid]
+                        conn.sendall(b"222 0 <%s>\r\n" % msgid.encode() + body + b".\r\n")
+                    elif command.startswith(b"authinfo"):
+                        conn.sendall(b"281 Auth accepted\r\n")
+        except Exception:
+            pass
+        finally:
+            conn.close()
+
+    def stop(self):
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=2)
+        if self.server_socket:
+            try:
+                self.server_socket.close()
+            except OSError:
+                pass
+
+
+class TestRawTransportCapture:
+    """T04: valid encrypted wire with an ordinary-yEnc-looking Line 1 salt must survive
+    sabctools' native autodetection through the real NewsWrapper transport."""
+
+    @pytest.mark.parametrize("chunked", [False, True])
+    def test_forced_prefix_salt_single_part_decodes_through_real_transport(self, chunked):
+        """Salt b'=ybegin ABCDEFGH' makes native sabctools consume the article as ordinary
+        yEnc (no raw lines). The raw bytes must be preserved at the transport seam so the
+        restoration/authentication pipeline still sees the valid article."""
+        password = "forced_prefix_transport"
+        plaintext = b"prefix salt validation"
+        enc_body, *_ = _encrypted_wire(password=password, plaintext=plaintext, salt=b"=ybegin ABCDEFGH")
+        split_at = [len(enc_body) // 2] if chunked else None
+        srv, s1, art, mock_downloader, mock_bps, mock_cache, mock_queue = _transport_server_and_article(
+            enc_body, password, split_at=split_at
+        )
+
+        try:
+            with (
+                mock.patch.object(sabnzbd, "Downloader", mock_downloader, create=True),
+                mock.patch.object(sabnzbd, "BPSMeter", mock_bps, create=True),
+                mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
+                mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
+            ):
+                nw1 = NewsWrapper(s1, thrdnum=1)
+                s1.idle_threads.add(nw1)
+                nw1.init_connect()
+                for _ in range(50):
+                    if nw1.connected:
+                        break
+                    time.sleep(0.05)
+                _connect_and_fetch(nw1, s1, art)
+                if split_at:
+                    nw1.read()
+
+                mock_cache.save_article.assert_called_once()
+                _saved_art, saved_data = mock_cache.save_article.call_args[0]
+                assert bytes(saved_data) == plaintext
+        finally:
+            srv.stop()
+
+    def test_forced_prefix_salt_multipart_decodes_through_real_transport(self):
+        """Multipart article with the forced prefix salt through real transport."""
+        password = "forced_prefix_multipart"
+        plaintext = b"prefix salt multipart validation"
+        enc_body, *_ = _encrypted_wire(password=password, plaintext=plaintext, salt=b"=ybegin ABCDEFGH", multipart=True)
+        srv, s1, art, mock_downloader, mock_bps, mock_cache, mock_queue = _transport_server_and_article(
+            enc_body, password
+        )
+
+        try:
+            with (
+                mock.patch.object(sabnzbd, "Downloader", mock_downloader, create=True),
+                mock.patch.object(sabnzbd, "BPSMeter", mock_bps, create=True),
+                mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
+                mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
+            ):
+                nw1 = NewsWrapper(s1, thrdnum=1)
+                s1.idle_threads.add(nw1)
+                nw1.init_connect()
+                for _ in range(50):
+                    if nw1.connected:
+                        break
+                    time.sleep(0.05)
+                _connect_and_fetch(nw1, s1, art)
+
+                mock_cache.save_article.assert_called_once()
+                _saved_art, saved_data = mock_cache.save_article.call_args[0]
+                assert bytes(saved_data) == plaintext
+        finally:
+            srv.stop()
+
+    def test_pipelined_encrypted_articles_both_decode_through_real_transport(self):
+        """Two pipelined encrypted articles answered in one read: both raw captures are
+        sliced at their own response boundaries and both decode to plaintext."""
+        password = "pipelined_transport"
+        plaintext = b"pipelined plaintext payload!"
+        enc_body, *_ = _encrypted_wire(password=password, plaintext=plaintext)
+        srv = _PipelinedNNTPServer(enc_body)
+        srv.start()
+        s1 = Server(
+            server_id="srv_pipe",
+            displayname="Pipelined Server",
+            host=srv.host,
+            port=srv.port,
+            timeout=5,
+            threads=0,
+            priority=0,
+            use_ssl=False,
+            ssl_verify=0,
+            ssl_ciphers="",
+            pipelining_requests=mock.Mock(return_value=2),
+        )
+        s1.addrinfo = AddrInfo(*socket.getaddrinfo(srv.host, srv.port, socket.AF_INET, socket.SOCK_STREAM)[0])
+        s1.active = True
+
+        mock_downloader = mock.MagicMock(spec=Downloader)
+        mock_downloader.servers = [s1]
+        mock_downloader.reset_nw = lambda nw, *args, **kwargs: None
+        mock_downloader.finish_connect_nw = lambda nw, resp: Downloader.finish_connect_nw(mock_downloader, nw, resp)
+        mock_downloader.decode = lambda article, resp: Downloader.decode(article, resp)
+        mock_downloader.modify_socket = lambda nw, event: None
+        mock_downloader.remove_socket = lambda nw: None
+        mock_downloader.no_active_jobs = lambda: False
+        mock_downloader.shutdown = False
+        mock_downloader.paused_for_postproc = False
+        mock_downloader.force_disconnect = False
+
+        mock_bps = mock.MagicMock()
+        mock_cache = mock.MagicMock()
+        mock_queue = mock.MagicMock()
+
+        mock_nzo = mock.MagicMock()
+        mock_nzo.password = password
+        mock_nzo.yenc_encrypted = True
+        mock_nzo.precheck = False
+        mock_nzo.removed_from_queue = False
+        mock_nzo.status = "active"
+        mock_nzo.priority = 0
+        mock_nzo.update_download_stats = mock.MagicMock()
+
+        mock_nzf = mock.MagicMock()
+        mock_nzf.nzo = mock_nzo
+        mock_nzf.filename_checked = True
+        mock_nzf.type = "yenc"
+
+        art = Article("art@e2e", 100, mock_nzf)
+        art.lowest_partnum = False
+        art.on_disk = False
+        art.tries = 0
+
+        try:
+            with (
+                mock.patch.object(sabnzbd, "Downloader", mock_downloader, create=True),
+                mock.patch.object(sabnzbd, "BPSMeter", mock_bps, create=True),
+                mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
+                mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
+            ):
+                nw1 = NewsWrapper(s1, thrdnum=1)
+                s1.idle_threads.add(nw1)
+                nw1.init_connect()
+                for _ in range(50):
+                    if nw1.connected:
+                        break
+                    time.sleep(0.05)
+                nw1.nntp.sock.setblocking(True)
+                nw1.nntp.sock.settimeout(2)
+                nw1.read()
+                assert nw1.ready
+
+                # Pipeline two requests: the second command goes out once the first
+                # response is read (concurrency semaphore), then both decode.
+                for _ in range(2):
+                    art.fetcher = s1
+                    nw1.queue_article(art)
+                    nw1.write()
+                for _ in range(6):
+                    nw1.read()
+                    nw1.write()
+                    if mock_cache.save_article.call_count >= 2:
+                        break
+
+                assert mock_cache.save_article.call_count == 2
+                for call in mock_cache.save_article.call_args_list:
+                    assert bytes(call.args[1]) == plaintext
+        finally:
+            srv.stop()
+
+    def test_mixed_pipelined_plain_and_encrypted_articles_both_decode(self):
+        """A large plain article pipelined ahead of an encrypted article on one connection
+        must not release the encrypted article's journal bound: both decode to plaintext."""
+        import sabctools
+
+        password = "mixed_pipelined_transport"
+        plain_data = b"0123456789" * 400  # ~4 KB plain article
+        encoded, crc = sabctools.yenc_encode(plain_data)
+        plain_body = (
+            b"=ybegin line=128 size=%d name=plain.bin\r\n" % len(plain_data)
+            + encoded
+            + b"\r\n=yend size=%d crc32=%08x\r\n" % (len(plain_data), crc)
+        )
+        plaintext = b"mixed pipelined encrypted payload!"
+        enc_body, *_ = _encrypted_wire(password=password, plaintext=plaintext, salt=b"=ybegin ABCDEFGH")
+
+        srv = _MixedPipelinedNNTPServer(
+            {
+                "plain@e2e": plain_body,
+                "enc@e2e": enc_body,
+            }
+        )
+        srv.start()
+        s1 = Server(
+            server_id="srv_mixed",
+            displayname="Mixed Server",
+            host=srv.host,
+            port=srv.port,
+            timeout=5,
+            threads=0,
+            priority=0,
+            use_ssl=False,
+            ssl_verify=0,
+            ssl_ciphers="",
+            pipelining_requests=mock.Mock(return_value=2),
+        )
+        s1.addrinfo = AddrInfo(*socket.getaddrinfo(srv.host, srv.port, socket.AF_INET, socket.SOCK_STREAM)[0])
+        s1.active = True
+
+        mock_downloader = mock.MagicMock(spec=Downloader)
+        mock_downloader.servers = [s1]
+        mock_downloader.reset_nw = lambda nw, *args, **kwargs: None
+        mock_downloader.finish_connect_nw = lambda nw, resp: Downloader.finish_connect_nw(mock_downloader, nw, resp)
+        mock_downloader.decode = lambda article, resp: Downloader.decode(article, resp)
+        mock_downloader.modify_socket = lambda nw, event: None
+        mock_downloader.remove_socket = lambda nw: None
+        mock_downloader.no_active_jobs = lambda: False
+        mock_downloader.shutdown = False
+        mock_downloader.paused_for_postproc = False
+        mock_downloader.force_disconnect = False
+
+        mock_bps = mock.MagicMock()
+        mock_cache = mock.MagicMock()
+        mock_queue = mock.MagicMock()
+
+        def _make_article(msgid, encrypted):
+            nzo = mock.MagicMock()
+            nzo.password = password if encrypted else None
+            nzo.yenc_encrypted = encrypted
+            nzo.precheck = False
+            nzo.removed_from_queue = False
+            nzo.status = "active"
+            nzo.priority = 0
+            nzo.update_download_stats = mock.MagicMock()
+            nzf = mock.MagicMock()
+            nzf.nzo = nzo
+            nzf.filename_checked = True
+            nzf.type = "yenc"
+            art = Article(msgid, 100, nzf)
+            art.lowest_partnum = False
+            art.on_disk = False
+            art.tries = 0
+            return art
+
+        plain_art = _make_article("plain@e2e", False)
+        enc_art = _make_article("enc@e2e", True)
+
+        try:
+            with (
+                mock.patch.object(sabnzbd, "Downloader", mock_downloader, create=True),
+                mock.patch.object(sabnzbd, "BPSMeter", mock_bps, create=True),
+                mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
+                mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
+                mock.patch.object(sabnzbd, "WriteMonitor", mock.MagicMock(allow_direct_decode=False), create=True),
+            ):
+                nw1 = NewsWrapper(s1, thrdnum=1)
+                s1.idle_threads.add(nw1)
+                nw1.init_connect()
+                for _ in range(50):
+                    if nw1.connected:
+                        break
+                    time.sleep(0.05)
+                nw1.nntp.sock.setblocking(True)
+                nw1.nntp.sock.settimeout(2)
+                nw1.read()
+                assert nw1.ready
+
+                # Pipeline the large plain article first, then the encrypted one; both
+                # responses arrive in one read while the journal is armed for the
+                # encrypted article only.
+                for art in (plain_art, enc_art):
+                    art.fetcher = s1
+                    nw1.queue_article(art)
+                    nw1.write()
+                for _ in range(8):
+                    nw1.read()
+                    nw1.write()
+                    if mock_cache.save_article.call_count >= 2:
+                        break
+
+                assert mock_cache.save_article.call_count == 2
+                saved = {call.args[0].article: bytes(call.args[1]) for call in mock_cache.save_article.call_args_list}
+                assert saved["plain@e2e"] == plain_data
+                assert saved["enc@e2e"] == plaintext
+        finally:
+            srv.stop()
+
+    def test_plain_substitution_through_transport_still_fails_closed(self):
+        """An ordinary yEnc article served to a declared-encrypted job through real
+        transport must still release no plaintext (raw reconstruction fails closed)."""
+        import sabctools
+
+        password = "plain_sub_transport"
+        plain_data = b"plain unencrypted substitution!"
+        encoded, crc = sabctools.yenc_encode(plain_data)
+        plain_body = (
+            b"=ybegin line=128 size=%d name=plain.bin\r\n" % len(plain_data)
+            + encoded
+            + b"\r\n=yend size=%d crc32=%08x\r\n" % (len(plain_data), crc)
+        )
+        srv, s1, art, mock_downloader, mock_bps, mock_cache, mock_queue = _transport_server_and_article(
+            plain_body, password
+        )
+
+        try:
+            with (
+                mock.patch.object(sabnzbd, "Downloader", mock_downloader, create=True),
+                mock.patch.object(sabnzbd, "BPSMeter", mock_bps, create=True),
+                mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
+                mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
+            ):
+                nw1 = NewsWrapper(s1, thrdnum=1)
+                s1.idle_threads.add(nw1)
+                nw1.init_connect()
+                for _ in range(50):
+                    if nw1.connected:
+                        break
+                    time.sleep(0.05)
+                _connect_and_fetch(nw1, s1, art)
+
+                assert not mock_cache.save_article.called
+                assert not art.on_disk
+        finally:
+            srv.stop()
+
+    def test_capture_released_on_hard_reset(self):
+        """Raw capture storage is released when the connection is reset."""
+
+        server = mock.MagicMock()
+        server.timeout = 10
+        server.ssl = False
+        server.pipelining_requests.return_value = 1
+
+        nw = NewsWrapper(server, thrdnum=1)
+        nw.decoder = _FakeDecoder(1024)
+        nw.nntp = mock.MagicMock()
+        nw.nntp.nw = nw
+        nw.raw_capture.arm(mock.MagicMock(spec=Article, bytes=100))
+        nw.raw_capture.add(b"x" * 100)
+
+        with (mock.patch.object(sabnzbd, "Downloader", create=True) as mock_dl,):
+            mock_dl.remove_socket = lambda nw: None
+            nw.hard_reset(wait=False)
+
+        assert nw.raw_capture.retained == 0
+
+    def test_raw_capture_bound_trips_fail_closed(self):
+        """The enforced article bound drops the journal instead of growing it; take()
+        then yields no capture and encrypted articles fail closed (never wrong output)."""
+        from sabnzbd.newswrapper import _RawBodyCapture
+
+        cap = _RawBodyCapture()
+        cap._bound = 200  # direct bound for the unit test; production arms via arm()
+        cap.add(b"a" * 100)
+        assert cap.retained == 100
+        # Bound trip: journal dropped, accounting continues
+        cap.add(b"b" * 150)
+        assert cap.retained == 0
+        assert cap._dropped
+        # Later slices are also unavailable (journal gone), never garbage
+        assert cap.take(10) is None
+
+    def test_raw_capture_arm_release_bookkeeping(self):
+        """arm/release balance the bound; the last release clears storage."""
+        from sabnzbd.newswrapper import _RawBodyCapture
+
+        art = mock.MagicMock(spec=Article)
+        art.bytes = 1000
+        cap = _RawBodyCapture()
+        assert not cap.active
+        cap.arm(art)
+        assert cap.active
+        cap.add(b"data")
+        cap.release(art)
+        assert not cap.active
+        assert cap.retained == 0
+
+    def test_plain_article_release_does_not_destroy_encrypted_bound(self):
+        """A plain article's discard/response release (even with a huge declared size)
+        must not decrement another in-flight encrypted article's journal bound on a
+        shared connection (release sites use the arming condition, precheck excluded)."""
+
+        server = mock.MagicMock()
+        server.timeout = 10
+        server.pipelining_requests = mock.Mock(return_value=1)
+
+        nw = NewsWrapper(server, thrdnum=1)
+        nw.decoder = _FakeDecoder(1024)
+        nw.nntp = mock.MagicMock()
+        nw.nntp.nw = nw
+
+        enc_art = mock.MagicMock(spec=Article)
+        enc_art.bytes = 1000
+        enc_art.nzf.nzo.yenc_encrypted = True
+        enc_art.nzf.nzo.precheck = False
+        enc_art.nzf.nzo.removed_from_queue = False
+        enc_art.nzf.nzo.allow_new_fetcher = mock.MagicMock()
+
+        nw.raw_capture.arm(enc_art)
+        nw.raw_capture.add(b"x" * 500)
+
+        # Plain article on the same connection: its response slice is consumed from the
+        # FIFO to stay aligned, but its release must not touch the encrypted bound.
+        plain_art = mock.MagicMock(spec=Article)
+        plain_art.bytes = 1_000_000
+        plain_art.nzf.nzo.yenc_encrypted = False
+        plain_art.nzf.nzo.precheck = False
+        plain_art.nzf.nzo.removed_from_queue = False
+
+        response = _mock_response()
+        response.bytes_read = 100
+        response.status_code = 222
+        nw._with_raw_lines(plain_art, response)
+        assert nw.raw_capture.active  # bound survived the plain release
+        assert nw.raw_capture.retained == 400
+
+        # discard() of the plain article also must not retire the encrypted bound
+        nw.discard(plain_art, count_article_try=False)
+        assert nw.raw_capture.active
+
+        nw.raw_capture.release(enc_art)
+        assert not nw.raw_capture.active
+
+    def test_precheck_article_release_does_not_destroy_encrypted_bound(self):
+        """A precheck encrypted article (which never armed) must not release the bound of
+        an in-flight non-precheck encrypted article's journal."""
+        server = mock.MagicMock()
+        server.timeout = 10
+        server.pipelining_requests = mock.Mock(return_value=1)
+
+        nw = NewsWrapper(server, thrdnum=1)
+        nw.decoder = _FakeDecoder(1024)
+        nw.nntp = mock.MagicMock()
+        nw.nntp.nw = nw
+
+        enc_art = mock.MagicMock(spec=Article)
+        enc_art.bytes = 1000
+        enc_art.nzf.nzo.yenc_encrypted = True
+        enc_art.nzf.nzo.precheck = False
+        enc_art.nzf.nzo.removed_from_queue = False
+
+        nw.raw_capture.arm(enc_art)
+        nw.raw_capture.add(b"y" * 300)
+
+        precheck_art = mock.MagicMock(spec=Article)
+        precheck_art.bytes = 999_999
+        precheck_art.nzf.nzo.yenc_encrypted = True
+        precheck_art.nzf.nzo.precheck = True
+        precheck_art.nzf.nzo.removed_from_queue = False
+
+        response = _mock_response()
+        response.bytes_read = 100
+        response.status_code = 222
+        nw._with_raw_lines(precheck_art, response)
+        nw.discard(precheck_art, count_article_try=False)
+        assert nw.raw_capture.active
+        assert nw.raw_capture.retained == 200
+
+        nw.raw_capture.release(enc_art)
+        assert not nw.raw_capture.active
+
+    def test_raw_capture_slices_pipelined_responses_exactly(self):
+        """take() returns each response's exact bytes in FIFO order across pipelining."""
+        from sabnzbd.newswrapper import _RawBodyCapture
+
+        cap = _RawBodyCapture()
+        cap._bound = 4096
+        r1 = b"222 0 <a>\r\nLINE1\r\nLINE2\r\n.\r\n"
+        r2 = b"430 No Such Article\r\n"
+        cap.add(r1[:20])
+        cap.add(r1[20:] + r2)
+
+        assert cap.take(len(r1)) == r1
+        assert cap.take(len(r2)) == r2
+        assert cap.retained == 0
+        assert cap.take(5) is None
+
+
 def _registered_success(queue_mock) -> bool:
     """The success flag of the last NzbQueue.register_article call, positional or keyword."""
     call = queue_mock.register_article.call_args
@@ -2097,7 +2742,7 @@ class _FakeDecoder(bytearray):
     def __init__(self, size):
         super().__init__(size)
         self.processed = []
-        self.pending = 0
+        self.pending = ()
         self.expected = 0
 
     def process(self, n):
