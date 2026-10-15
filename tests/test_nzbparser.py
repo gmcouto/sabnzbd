@@ -20,11 +20,17 @@ tests.test_nzbparser - Tests of basic NZB parsing
 """
 
 import gzip
+import logging
 import os
+from types import SimpleNamespace
+from unittest import mock
 import pytest
+import sabnzbd
+from sabnzbd.constants import AddNzbFileResult
 from tests.testhelper import SAB_CACHE_DIR, SAB_DATA_DIR, create_and_read_nzb_fp
 import sabnzbd.nzbparser as nzbparser
 from sabnzbd.nzb import NzbObject
+from sabnzbd.nzbqueue import NzbQueue
 from sabnzbd.filesystem import save_compressed
 
 
@@ -301,3 +307,235 @@ class TestNzbParser:
             _write_nzb_gz(SAB_CACHE_DIR, "plain_yes", make_nzb([("yenc_encrypted", "yes")])), plain
         )
         assert plain.yenc_encrypted is False
+
+    @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
+    def test_empty_yenc_version_and_cipher_meta_are_rejected_for_encrypted_nzbs(self):
+        """Body Std v1.2 §8: a present-but-empty yenc_version/yenc_cipher counts as a non-matching value,
+        not as an absent entry; it must fail closed as METADATA_VALIDATION during real ingestion.
+        Covers self-closing (<meta .../>) and explicit-empty (<meta ...></meta>) XML forms, plus a
+        valid-nonempty-plus-empty duplicate of the same tag."""
+        from sabnzbd.encryption import YEncEncryptionStructuralError
+
+        def make_nzb(meta_entries: list[tuple[str, str]]) -> str:
+            metas = "\n".join(f'  <meta type="{t}">{v}</meta>' for t, v in meta_entries)
+            return f"""<?xml version="1.0" encoding="utf-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
+ <head>
+{metas}
+ </head>
+ <file poster="p@test.com" date="1600000000" subject="test.bin">
+  <segments><segment bytes="1000" number="1">s1@test</segment></segments>
+ </file>
+</nzb>"""
+
+        # Both empty XML forms of both tags (self-closing and explicit empty), plus whitespace-only
+        empty_declarations = [
+            (
+                [("yenc_encrypted", "true"), ("yenc_version", ""), ("password", "pw")],
+                "UNSUPPORTED_VERSION",
+                "ver_self_closing",
+            ),
+            (
+                [("yenc_encrypted", "true"), ("yenc_version", ""), ("password", "pw")],
+                "UNSUPPORTED_VERSION",
+                "ver_explicit_empty",
+            ),
+            (
+                [("yenc_encrypted", "true"), ("yenc_cipher", ""), ("password", "pw")],
+                "UNSUPPORTED_CIPHER",
+                "cipher_self_closing",
+            ),
+            (
+                [("yenc_encrypted", "true"), ("yenc_cipher", ""), ("password", "pw")],
+                "UNSUPPORTED_CIPHER",
+                "cipher_explicit_empty",
+            ),
+            (
+                [("yenc_encrypted", "true"), ("yenc_version", " "), ("password", "pw")],
+                "UNSUPPORTED_VERSION",
+                "ver_whitespace_only",
+            ),
+            (
+                [("yenc_encrypted", "true"), ("yenc_cipher", " "), ("password", "pw")],
+                "UNSUPPORTED_CIPHER",
+                "cipher_whitespace_only",
+            ),
+        ]
+        for entries, token, name in empty_declarations:
+            xml = make_nzb(entries)
+            if name.endswith("_self_closing"):
+                tag = "yenc_version" if "ver" in name else "yenc_cipher"
+                xml = xml.replace(f'<meta type="{tag}"></meta>', f'<meta type="{tag}"/>')
+            with pytest.raises(YEncEncryptionStructuralError, match=token):
+                nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, name, xml), NzbObject(name))
+
+        # Valid value plus an empty duplicate of the same tag: the empty entry must survive
+        # collection and trip the existing validation gate
+        for tag, token in (("yenc_version", "UNSUPPORTED_VERSION"), ("yenc_cipher", "UNSUPPORTED_CIPHER")):
+            xml = make_nzb(
+                [
+                    ("yenc_encrypted", "true"),
+                    (tag, "1.2" if tag == "yenc_version" else "XChaCha20-Poly1305"),
+                    (tag, ""),
+                    ("password", "pw"),
+                ]
+            )
+            with pytest.raises(YEncEncryptionStructuralError, match=token):
+                nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, f"dup_{tag}", xml), NzbObject(f"dup_{tag}"))
+
+        # Unencrypted ordinary controls: empty/absent version and cipher meta have no effect
+        # on a plain NZB and empty arbitrary metadata still stays discarded
+        plain_nzo = NzbObject("plain_empty_meta")
+        nzbparser.nzbfile_parser(
+            _write_nzb_gz(
+                SAB_CACHE_DIR,
+                "plain_empty_meta",
+                make_nzb([("yenc_version", ""), ("yenc_cipher", ""), ("category", "movies")]),
+            ),
+            plain_nzo,
+        )
+        assert plain_nzo.yenc_encrypted is False
+        assert plain_nzo.meta["category"] == ["movies"]
+
+        # Arbitrary empty metadata stays discarded
+        plain_arbitrary = NzbObject("plain_arbitrary")
+        nzbparser.nzbfile_parser(
+            _write_nzb_gz(
+                SAB_CACHE_DIR,
+                "plain_arbitrary",
+                make_nzb([("arbitrary_field", ""), ("category", "movies")]),
+            ),
+            plain_arbitrary,
+        )
+        assert "arbitrary_field" not in plain_arbitrary.meta
+        assert plain_arbitrary.meta["category"] == ["movies"]
+
+    @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
+    def test_empty_yenc_version_and_cipher_meta_ingest_lifecycle(self, monkeypatch, tmp_path, caplog):
+        """Through the real process_single_nzb ingestion path: empty self-closing or explicit-empty
+        version/cipher declarations are logged as ERROR, the job is not added to the queue, and no
+        article scheduling or provider query happens."""
+
+        def make_nzb(meta_entries: list[tuple[str, str]]) -> str:
+            metas = "\n".join(f'  <meta type="{t}">{v}</meta>' for t, v in meta_entries)
+            return f"""<?xml version="1.0" encoding="utf-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
+ <head>
+{metas}
+ </head>
+ <file poster="p@test.com" date="1600000000" subject="test.bin">
+  <segments><segment bytes="1000" number="1">s1@test</segment></segments>
+ </file>
+</nzb>"""
+
+        monkeypatch.setattr(sabnzbd.cfg.admin_dir, "get_path", lambda: str(tmp_path / "admin"))
+        monkeypatch.setattr(sabnzbd.cfg.download_dir, "get_path", lambda: str(tmp_path / "downloads"))
+        os.makedirs(str(tmp_path / "admin"), exist_ok=True)
+        os.makedirs(str(tmp_path / "downloads"), exist_ok=True)
+
+        sabnzbd.config.ConfigCat("*", {})
+        sabnzbd.Scheduler = mock.Mock()
+        sabnzbd.Scheduler.analyse = mock.Mock(return_value=False)
+        sabnzbd.ArticleCache = mock.Mock()
+        sabnzbd.Assembler = mock.Mock()
+        sabnzbd.BPSMeter = mock.Mock()
+        sabnzbd.Downloader = SimpleNamespace(paused=False, servers=[])
+        sabnzbd.Downloader.highest_server = lambda server: True
+        queue = NzbQueue()
+        sabnzbd.NzbQueue = queue
+        sabnzbd.PostProcessor = mock.Mock()
+        try:
+            cases = [
+                ("ver_self_closing", '<meta type="yenc_version"/>', "UNSUPPORTED_VERSION"),
+                ("cipher_self_closing", '<meta type="yenc_cipher"/>', "UNSUPPORTED_CIPHER"),
+            ]
+            for name, self_closing_meta, match_token in cases:
+                xml = make_nzb([("yenc_encrypted", "true"), ("password", "pw")])
+                xml = xml.replace(
+                    '  <meta type="password">pw</meta>',
+                    f'  <meta type="password">pw</meta>\n  {self_closing_meta}',
+                )
+                nzb_path = _write_nzb_gz(SAB_CACHE_DIR, f"ingest_{name}", xml)
+
+                caplog.set_level(logging.DEBUG)
+                caplog.clear()
+                with mock.patch.object(NzbQueue, "get_articles", wraps=queue.get_articles) as get_articles_mock:
+                    result, nzo_ids = nzbparser.process_single_nzb(f"{name}.nzb.gz", path=nzb_path, keep=True)
+                    assert result == AddNzbFileResult.ERROR
+                    assert nzo_ids == []
+                    assert get_articles_mock.call_count == 0
+                assert any(record.levelno == logging.ERROR for record in caplog.records)
+                assert "Structural yEnc-encryption failure" in caplog.text
+                assert match_token in caplog.text
+                assert queue.is_empty()
+
+            # Explicit-empty form through real ingestion as well
+            xml = make_nzb([("yenc_encrypted", "true"), ("password", "pw"), ("yenc_cipher", "")])
+            nzb_path = _write_nzb_gz(SAB_CACHE_DIR, "ingest_cipher_explicit_empty", xml)
+            caplog.set_level(logging.DEBUG)
+            caplog.clear()
+            with mock.patch.object(NzbQueue, "get_articles", wraps=queue.get_articles) as get_articles_mock:
+                result, nzo_ids = nzbparser.process_single_nzb("cipher_explicit_empty.nzb.gz", path=nzb_path, keep=True)
+                assert result == AddNzbFileResult.ERROR
+                assert nzo_ids == []
+                assert get_articles_mock.call_count == 0
+            assert any(record.levelno == logging.ERROR for record in caplog.records)
+            assert "Structural yEnc-encryption failure" in caplog.text
+            assert "UNSUPPORTED_CIPHER" in caplog.text
+            assert queue.is_empty()
+
+            # Valid-plus-empty duplicate through real ingestion
+            xml_dup = make_nzb(
+                [
+                    ("yenc_encrypted", "true"),
+                    ("password", "pw"),
+                    ("yenc_version", "1.2"),
+                    ("yenc_version", ""),
+                ]
+            )
+            nzb_path = _write_nzb_gz(SAB_CACHE_DIR, "ingest_ver_dup_empty", xml_dup)
+            caplog.set_level(logging.DEBUG)
+            caplog.clear()
+            with mock.patch.object(NzbQueue, "get_articles", wraps=queue.get_articles) as get_articles_mock:
+                result, nzo_ids = nzbparser.process_single_nzb("ver_dup_empty.nzb.gz", path=nzb_path, keep=True)
+                assert result == AddNzbFileResult.ERROR
+                assert nzo_ids == []
+                assert get_articles_mock.call_count == 0
+            assert any(record.levelno == logging.ERROR for record in caplog.records)
+            assert "Structural yEnc-encryption failure" in caplog.text
+            assert "UNSUPPORTED_VERSION" in caplog.text
+            assert queue.is_empty()
+
+            # Valid encrypted NZB with absent optional fields: ingests successfully
+            absent_xml = make_nzb([("yenc_encrypted", "true"), ("password", "pw")])
+            absent_path = _write_nzb_gz(SAB_CACHE_DIR, "ingest_absent", absent_xml)
+            result, nzo_ids = nzbparser.process_single_nzb("absent.nzb.gz", path=absent_path, keep=True)
+            assert result == AddNzbFileResult.OK
+            assert len(nzo_ids) == 1
+            assert not queue.is_empty()
+            nzo = queue.get_nzo(nzo_ids[0])
+            assert nzo is not None
+            assert nzo.yenc_encrypted is True
+            queue.remove(nzo_ids[0], delete_all_data=True)
+
+            # Ordinary control: a valid unencrypted NZB still ingests normally
+            ordinary_path = _write_nzb_gz(
+                SAB_CACHE_DIR,
+                "ingest_ordinary",
+                make_nzb([("yenc_version", ""), ("yenc_cipher", ""), ("category", "movies")]),
+            )
+            result, nzo_ids = nzbparser.process_single_nzb("ordinary.nzb.gz", path=ordinary_path, keep=True)
+            assert result == AddNzbFileResult.OK
+            assert len(nzo_ids) == 1
+            assert not queue.is_empty()
+        finally:
+            for attr in (
+                "NzbQueue",
+                "Downloader",
+                "BPSMeter",
+                "Assembler",
+                "ArticleCache",
+                "Scheduler",
+                "PostProcessor",
+            ):
+                delattr(sabnzbd, attr)

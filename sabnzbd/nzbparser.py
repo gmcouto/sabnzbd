@@ -423,11 +423,19 @@ def nzbfile_parser(full_nzb_path: str, nzo):
             if element.tag.lower() == "head":
                 for meta in element.iter("meta"):
                     meta_type = meta.attrib.get("type")
-                    if meta_type and meta.text:
-                        # Meta tags can occur multiple times
-                        if meta_type not in nzo.meta:
-                            nzo.meta[meta_type] = []
-                        nzo.meta[meta_type].append(meta.text)
+                    if meta_type:
+                        # Body Standard v1.2 §8: an empty yenc_version or yenc_cipher entry counts as a
+                        # non-matching value (failing closed), not as absent. Narrowly retain None text
+                        # as empty for recognized version/cipher fields so validation can reject them.
+                        if meta_type in ("yenc_version", "yenc_cipher"):
+                            if meta_type not in nzo.meta:
+                                nzo.meta[meta_type] = []
+                            nzo.meta[meta_type].append(meta.text or "")
+                        elif meta.text:
+                            # Meta tags can occur multiple times
+                            if meta_type not in nzo.meta:
+                                nzo.meta[meta_type] = []
+                            nzo.meta[meta_type].append(meta.text)
                 element.clear()
                 logging.debug("NZB file meta-data = %s", nzo.meta)
                 continue
