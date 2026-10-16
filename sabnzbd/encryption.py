@@ -52,9 +52,11 @@ BOOTSTRAP_PREFIX_LEN = 20
 
 
 def _split_ending(line: bytes) -> tuple[bytes, bytes]:
-    """Split line content and CRLF terminator (b'\r\n')."""
+    """Split line content and its CRLF or bare LF terminator (b'\\r\\n' or b'\\n')."""
     if line.endswith(b"\r\n"):
         return line[:-2], b"\r\n"
+    elif line.endswith(b"\n"):
+        return line[:-1], b"\n"
     return line, b""
 
 
@@ -394,7 +396,7 @@ def extract_and_remove_yencryption(yenc_block: bytes) -> tuple[dict[str, Any], b
         part_begin = 1
         segment_bytes = _required_int(ybegin_values, b"size", "=ybegin")
 
-    if part_begin >= (1 << 32) or segment_bytes >= (1 << 32):
+    if part_number >= (1 << 32) or part_begin >= (1 << 32) or segment_bytes >= (1 << 32):
         raise YEncEncryptionCryptoError("SIZE_OVERFLOW: size or offset exceeds 4 GiB (2^32 bytes)")
     if b"size" in ybegin_values and _required_int(ybegin_values, b"size", "=ybegin") >= (1 << 32):
         raise YEncEncryptionCryptoError("SIZE_OVERFLOW: size exceeds 4 GiB (2^32 bytes)")
@@ -460,10 +462,11 @@ def extract_bootstrap_from_line1(line1: bytes) -> tuple[bytes, int]:
 def split_lines_preserving_endings(input_bytes: bytes) -> list[bytes]:
     """Split bytes into lines while preserving \r\n or \n endings.
 
-    For encrypted wire articles (which do not begin with =y), Line 1 carries a
-    20-byte bootstrap prefix ([16B salt][4B uint32_be(segmentIndex)]). Because
-    uint32_be(segmentIndex) may contain 0x0A (LF) or 0x0D (CR), the Line 1 terminator
-    is searched strictly after the 20-byte bootstrap prefix.
+    Line 1 carries a 20-byte bootstrap prefix ([16B salt][4B uint32_be(segmentIndex)]).
+    Because uint32_be(segmentIndex) may contain 0x0A (LF) or 0x0D (CR), the Line 1
+    terminator is searched strictly after the 20-byte bootstrap prefix. The skip is
+    unconditional: the salt is arbitrary bytes and may itself begin with b"=y", so
+    Line 1 cannot be recognised by a "=y" prefix.
     """
     if not input_bytes:
         raise YEncEncryptionCryptoError("Empty encrypted article block")
@@ -472,7 +475,7 @@ def split_lines_preserving_endings(input_bytes: bytes) -> list[bytes]:
     total = len(input_bytes)
     while pos < total:
         start = pos
-        if not lines and not input_bytes.startswith(b"=y"):
+        if not lines:
             if total >= BOOTSTRAP_PREFIX_LEN:
                 pos += BOOTSTRAP_PREFIX_LEN
             else:

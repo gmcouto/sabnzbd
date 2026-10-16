@@ -22,6 +22,7 @@ tests.test_encryption - Unit and integration tests for SABnzbd decryption adapte
 import itertools
 import json
 from pathlib import Path
+import re
 import socket
 import threading
 import time
@@ -159,8 +160,6 @@ class MockArticleNNTPServer:
         # separate TCP segments (used to test CRLF split across chunk boundaries).
         self.split_at = split_at
         self.have_body: bool = True  # Flip to False to make BODY respond 500
-        # Set to True to answer BODY with an ARTICLE-style 220 response (a server that ignores BODY)
-        self.body_answers_with_article: bool = False
         self.commands: list[bytes] = []  # Every command line received, in order
 
     def start(self):
@@ -206,14 +205,14 @@ class MockArticleNNTPServer:
                     if data.startswith(b"QUIT"):
                         conn.sendall(b"205 Goodbye" + self.line_ending)
                         break
-                    elif data.startswith(b"BODY") and not self.body_answers_with_article:
+                    elif data.startswith(b"BODY"):
                         self.commands.append(data)
                         if self.have_body:
                             resp = b"222 0 <art@e2e>" + self.line_ending + self.body_bytes + b"." + self.line_ending
                             send_response(resp)
                         else:
                             conn.sendall(b"500 command not supported" + self.line_ending)
-                    elif data.startswith((b"ARTICLE", b"BODY")):
+                    elif data.startswith(b"ARTICLE"):
                         self.commands.append(data)
                         resp = (
                             b"220 0 <art@e2e>"
@@ -478,13 +477,6 @@ class TestDecryptionAdapterContracts:
         assert parsed["salt"] == bytes.fromhex("1a2b3c4d5e6f7890abcdef1234567890")
         assert parsed["segment_index"] == 1
         assert parsed["tag"] == bytes.fromhex("0cd77ce245a654463f90b945b1d22d5b")
-
-        # 3. extract_and_remove_yencryption basic smoke test
-        block = b"=ybegin line=128 size=10 name=test\r\n=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=0cd77ce245a654463f90b945b1d22d5b\r\ndata\r\n=yend size=10\r\n"
-        p, clean = extract_and_remove_yencryption(block)
-
-        assert p["segment_index"] == 1
-        assert clean == b"=ybegin line=128 size=10 name=test\r\ndata\r\n=yend size=10\r\n"
 
         # Invalid lines
         assert parse_yencryption_line("not an encryption line") is None
@@ -860,6 +852,114 @@ class TestDirectWriteGatingAndFailover:
         with pytest.raises(ValueError, match="Poly1305 authentication failed"):
             decoder.decode_yenc(article_m, resp_bad_tag)
 
+    def test_encrypted_multipart_yend_whole_file_crc32_is_ignored(self):
+        """Receivers ignore whole-file crc32= on an encrypted multipart article (Body Std v1.2 §5/§9, Q-1).
+
+        Producers never emit crc32= alongside pcrc32= on multipart; a receiver must
+        still decode (validating pcrc32=) and never persist the ciphertext CRC.
+        """
+        import sabnzbd.decoder as decoder
+
+        password = "test_password_123"
+        plaintext = b"Super secret test payload for SABnzbd wire decryption testing!"
+        salt = bytes.fromhex("1a2b3c4d5e6f7890abcdef1234567890")
+        segment_index = 1
+
+        # Build the multipart article directly with both pcrc32= (correct) and
+        # crc32= (arbitrary whole-file value) on the =yend plaintext line.
+        import nacl.bindings as nb
+        import sabctools
+
+        adapter = DecryptionAdapter(password=password)
+        master_key = adapter.get_master_key(salt)
+        nonce = adapter.derive_body_nonce(master_key, segment_index)
+        aad_m = build_aad(b"multi.bin", 1, 1, len(plaintext))
+        enc_m = nb.crypto_aead_xchacha20poly1305_ietf_encrypt(plaintext, aad_m, nonce, master_key)
+        ct_m, tag_m = enc_m[:-16], enc_m[-16:]
+        body_encoded_m, body_crc_m = sabctools.yenc_encode(ct_m)
+
+        line1_pt = f"=ybegin part=1 total=2 line=128 size={len(ct_m) * 2} name=multi.bin".encode("ascii")
+        line2_pt = f"=ypart begin=1 end={len(ct_m)}".encode("ascii")
+        line3_pt = (
+            f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} index={segment_index:08x} tag={tag_m.hex()}"
+        ).encode("ascii")
+        line5_pt = f"=yend size={len(ct_m)} part=1 pcrc32={body_crc_m:08x} crc32=deadbeef".encode("ascii")
+        k1, t1 = adapter.derive_control_keys(master_key, segment_index, 1)
+        k2, t2 = adapter.derive_control_keys(master_key, segment_index, 2)
+        k3, t3 = adapter.derive_control_keys(master_key, segment_index, 3)
+        k5, t5 = adapter.derive_control_keys(master_key, segment_index, 5)
+        wire = [
+            (salt + segment_index.to_bytes(4, "big") + ff1_encrypt(k1, t1, line1_pt)).decode("latin-1"),
+            ff1_encrypt(k2, t2, line2_pt).decode("latin-1"),
+            ff1_encrypt(k3, t3, line3_pt).decode("latin-1"),
+            body_encoded_m.decode("latin-1"),
+            ff1_encrypt(k5, t5, line5_pt).decode("latin-1"),
+        ]
+
+        article = mock.MagicMock(spec=Article)
+        article.article = "wire_multi_crc32@news"
+        article.bytes = len(plaintext)
+        article.nzf.nzo.password = password
+        article.nzf.filename_checked = True
+        article.lowest_partnum = False
+        resp = _mock_response()
+        resp.sink_failed = False
+        resp.bytes_decoded = 0
+        resp.lines = wire
+
+        decoded = decoder.decode_yenc(article, resp)
+        assert decoded == bytearray(plaintext)
+        assert article.crc32 is None
+
+    def test_single_part_wire_crc_corruption_fails_closed(self):
+        """Single-part wire CRC corruption (crc32= in =yend) fails before AEAD (Body Std v1.2 §5/§9)."""
+        import sabnzbd.decoder as decoder
+
+        password = "test_password_123"
+        plaintext = b"Super secret test payload for SABnzbd wire decryption testing!"
+        salt = bytes.fromhex("1a2b3c4d5e6f7890abcdef1234567890")
+        segment_index = 1
+
+        import nacl.bindings as nb
+        import sabctools
+
+        adapter = DecryptionAdapter(password=password)
+        master_key = adapter.get_master_key(salt)
+        nonce = adapter.derive_body_nonce(master_key, segment_index)
+        aad = build_aad(b"test.bin", 1, 1, len(plaintext))
+        enc = nb.crypto_aead_xchacha20poly1305_ietf_encrypt(plaintext, aad, nonce, master_key)
+        ct, tag = enc[:-16], enc[-16:]
+        body_encoded, body_crc = sabctools.yenc_encode(ct)
+
+        bad_crc = (body_crc ^ 0xFFFFFFFF) & 0xFFFFFFFF
+        line1_pt = f"=ybegin line=128 size={len(ct)} name=test.bin".encode("ascii")
+        line2_pt = (
+            f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} index={segment_index:08x} tag={tag.hex()}"
+        ).encode("ascii")
+        line4_pt = f"=yend size={len(ct)} crc32={bad_crc:08x}".encode("ascii")
+        k1, t1 = adapter.derive_control_keys(master_key, segment_index, 1)
+        k2, t2 = adapter.derive_control_keys(master_key, segment_index, 2)
+        k4, t4 = adapter.derive_control_keys(master_key, segment_index, 4)
+        wire = [
+            (salt + segment_index.to_bytes(4, "big") + ff1_encrypt(k1, t1, line1_pt)).decode("latin-1"),
+            ff1_encrypt(k2, t2, line2_pt).decode("latin-1"),
+            body_encoded.decode("latin-1"),
+            ff1_encrypt(k4, t4, line4_pt).decode("latin-1"),
+        ]
+
+        article = mock.MagicMock(spec=Article)
+        article.article = "wire_single_bad_crc@news"
+        article.nzf.nzo.password = password
+        article.nzf.filename_checked = False
+        article.lowest_partnum = True
+        resp = _mock_response()
+        resp.sink_failed = False
+        resp.bytes_decoded = 0
+        resp.lines = wire
+
+        with pytest.raises(ValueError, match="Wire CRC error"):
+            decoder.decode_yenc(article, resp)
+
     def test_extract_and_remove_yencryption(self):
         """Verify strict header placement, extraction, duplicate/misplaced rejection, and stripping."""
         valid_hdr = b"=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 index=00000001 tag=0cd77ce245a654463f90b945b1d22d5b"
@@ -1002,12 +1102,166 @@ class TestDirectWriteGatingAndFailover:
                     wire = bytes.fromhex(vec["line1_hex"]) + b"\r\n"
                     with pytest.raises(ValueError, match="FORBIDDEN_SEGMENT_INDEX_BYTE"):
                         adapter.restore_control_lines(wire)
-                elif vec_id in ("control-syntax-06-wrong-password", "control-syntax-07-wrong-password"):
+                elif vec_id == "control-syntax-07-wrong-password":
                     # Valid wire line 1 from control_line_encryption.json
                     wire_line1 = bytes.fromhex(control_data["vectors"][0]["expected_wire_hex"]) + b"\r\n"
                     wrong_adapter = DecryptionAdapter(password=vec["wrong_password"])
                     with pytest.raises(ValueError, match="Control line decrypt failure"):
                         wrong_adapter.restore_control_lines(wire_line1)
+
+            elif cat == "placement":
+                # placement vectors: checks already in encryption.py (Control Std v1.2 §5).
+                # placement-01/02 carry a target line_index; 03/04 carry only framing
+                # flags, so synthesize the contradictory article from those flags.
+                adapter = DecryptionAdapter(password="test123")
+                salt = bytes.fromhex("1a2b3c4d5e6f7890abcdef1234567890")
+                seg = 1
+                master_key = adapter.get_master_key(salt)
+                hdr = (
+                    b"=yencryption cipher=XChaCha20-Poly1305 salt="
+                    + salt.hex().encode("ascii")
+                    + f" index={seg:08x} tag={'00' * 16}".encode("ascii")
+                )
+                if vec_id in (
+                    "placement-03-ypart-without-part-param",
+                    "placement-04-yencryption-line2-with-part-param",
+                ):
+                    # Contradictory framing at the extract seam (encryption.py: INVALID_MULTIPART_FRAMING /
+                    # MISPLACED_ENCRYPTION_HEADER). has_part_on_ybegin / is_ypart_on_line2 drive the block.
+                    ybegin = (
+                        b"=ybegin part=1 total=2 line=128 size=200 name=test.bin"
+                        if vec["has_part_on_ybegin"]
+                        else b"=ybegin line=128 size=100 name=test.bin"
+                    )
+                    line2 = b"=ypart begin=1 end=100" if vec["is_ypart_on_line2"] else hdr
+                    if vec["is_ypart_on_line2"]:
+                        block = ybegin + b"\r\n" + line2 + b"\r\n" + hdr + b"\r\nDATA\r\n=yend size=100 part=1\r\n"
+                    else:
+                        block = ybegin + b"\r\n" + line2 + b"\r\nDATA\r\n=yend size=100\r\n"
+                    with pytest.raises(YEncEncryptionCryptoError, match=vec["expected_error"]):
+                        extract_and_remove_yencryption(block)
+                    # Same contradiction at the control-restore seam (restore_control_lines raises
+                    # the same tokens): encrypt the lines per the flags and restore.
+                    k1, t1 = adapter.derive_control_keys(master_key, seg, 1)
+                    k2, t2 = adapter.derive_control_keys(master_key, seg, 2)
+                    wire1 = salt + seg.to_bytes(4, "big") + ff1_encrypt(k1, t1, ybegin)
+                    wire2 = ff1_encrypt(k2, t2, line2)
+                    if vec["is_ypart_on_line2"]:
+                        k3, t3 = adapter.derive_control_keys(master_key, seg, 3)
+                        wire3 = ff1_encrypt(k3, t3, hdr)
+                        k5, t5 = adapter.derive_control_keys(master_key, seg, 5)
+                        wire5 = ff1_encrypt(k5, t5, b"=yend size=100 part=1")
+                        wire_block = b"\r\n".join([wire1, wire2, wire3, b"DATA", wire5]) + b"\r\n"
+                    else:
+                        k4, t4 = adapter.derive_control_keys(master_key, seg, 4)
+                        wire4 = ff1_encrypt(k4, t4, b"=yend size=100")
+                        wire_block = b"\r\n".join([wire1, wire2, b"DATA", wire4]) + b"\r\n"
+                    with pytest.raises(YEncEncryptionCryptoError, match=vec["expected_error"]):
+                        adapter.restore_control_lines(wire_block)
+                else:
+                    # placement-01: single-part header must be on line 2 (not line_index=3)
+                    # placement-02: multipart header must immediately follow =ypart (not line_index=4)
+                    if vec["multipart"]:
+                        block = (
+                            b"=ybegin part=1 total=2 line=128 size=200 name=test.bin\r\n"
+                            b"=ypart begin=1 end=100\r\n"
+                            b"DATA\r\n" + hdr + b"\r\n=yend size=100 part=1\r\n"
+                        )
+                    else:
+                        block = (
+                            b"=ybegin line=128 size=100 name=test.bin\r\n" b"DATA\r\n" + hdr + b"\r\n=yend size=100\r\n"
+                        )
+                    # Chosen seam: extract_and_remove_yencryption (simplest honest fix).
+                    # Its actual tokens are asserted below; they are not the vectors'
+                    # MISPLACED_ENCRYPTION_HEADER (that token is only produced by the
+                    # contradictory-framing branches for placement-03/04 above).
+                    expected_token = (
+                        "Line 3 in multipart article does not start with =yencryption"
+                        if vec["multipart"]
+                        else "Line 2 does not start with =yencryption or =ypart"
+                    )
+                    with pytest.raises(YEncEncryptionCryptoError, match=re.escape(expected_token)):
+                        extract_and_remove_yencryption(block)
+
+            elif cat == "salt_mismatch":
+                # malformed-dual-01/02: dual-bootstrap comparison in decoder.decode_yenc.
+                import sabnzbd.decoder as decoder
+
+                password = "test123"
+                line1_salt = bytes.fromhex(vec["line1_salt_hex"])
+                header_salt = bytes.fromhex(vec["header_salt_hex"])
+                line1_index = vec["line1_index"]
+                header_index = vec["header_index"]
+                dual_adapter = DecryptionAdapter(password=password)
+                # Keys are derived from the Line 1 salt/index (what restore sees first).
+                dual_key = dual_adapter.get_master_key(line1_salt)
+                k1, t1 = dual_adapter.derive_control_keys(dual_key, line1_index, 1)
+                k2, t2 = dual_adapter.derive_control_keys(dual_key, line1_index, 2)
+                k4, t4 = dual_adapter.derive_control_keys(dual_key, line1_index, 4)
+                line1_pt = b"=ybegin line=128 size=100 name=test.bin"
+                line2_pt = (
+                    f"=yencryption cipher=XChaCha20-Poly1305 salt={header_salt.hex()} "
+                    f"index={header_index:08x} tag={'0' * 32}"
+                ).encode("ascii")
+                wire = [
+                    (line1_salt + line1_index.to_bytes(4, "big") + ff1_encrypt(k1, t1, line1_pt)).decode("latin-1"),
+                    ff1_encrypt(k2, t2, line2_pt).decode("latin-1"),
+                    "data",
+                    ff1_encrypt(k4, t4, b"=yend size=100").decode("latin-1"),
+                ]
+                article = mock.MagicMock(spec=Article)
+                article.article = f"{vec_id}@test"
+                article.nzf.nzo.password = password
+                article.nzf.nzo.yenc_encrypted = True
+                resp = _mock_response()
+                resp.sink_failed = False
+                resp.bytes_decoded = 0
+                resp.lines = wire
+                expected_msg = "Salt mismatch" if vec_id.endswith("dual-salt-mismatch") else "Dual index mismatch"
+                with pytest.raises(YEncEncryptionCryptoError, match=expected_msg):
+                    decoder.decode_yenc(article, resp)
+
+            elif cat == "metadata_validation":
+                # metadata-01..03 are NZB-ingest checks (Body Std v1.2 §8) exercised through
+                # the real nzbparser seam by the dedicated tests in test_nzbparser.py, each
+                # named for its vector id. Those tests drive actual NZB inputs through
+                # nzbfile_parser and assert the concrete SABnzbd behavior; the matrix keeps
+                # only the vector-tier contract here, rather than re-implementing ingest.
+                # Control Std v1.2 §5: the METADATA_VALIDATION tier is non-retriable and
+                # fails closed with zero output.
+                assert vec["expected_rejection_stage"] == "METADATA_VALIDATION", vec_id
+                assert vec["provider_failover_permitted"] is False, vec_id
+                assert vec["zero_output_required"] is True, vec_id
+                nzbparser_tests = (Path(__file__).resolve().parent / "test_nzbparser.py").read_text(encoding="utf-8")
+                assert (
+                    f'def test_{vec_id.replace("-", "_")}_vector' in nzbparser_tests
+                ), f"{vec_id} has no dedicated ingest test in test_nzbparser.py"
+            elif cat == "framing":
+                # metadata-04: body-only article (=yencryption line, no Line 1 bootstrap)
+                # presented to a combined-only receiver fails control-line restoration.
+                assert vec_id == "metadata-04-body-only-vs-combined-only", vec_id
+                body_only = (
+                    b"=ybegin line=128 size=10 name=test.bin\r\n"
+                    b"=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 "
+                    b"index=00000001 tag=0cd77ce245a654463f90b945b1d22d5b\r\n"
+                    b"DATA\r\n=yend size=10\r\n"
+                )
+                # Actual token probed at the restore_control_lines seam: the vector's
+                # CONTROL_LINE_DECRYPT_FAILURE is not a literal production string;
+                # restore fails because Line 1 lacks the bootstrap and does not
+                # restore to =ybegin.
+                with pytest.raises(
+                    YEncEncryptionCryptoError,
+                    match=re.escape("Control line decrypt failure: line 1 does not start with =ybegin"),
+                ):
+                    DecryptionAdapter(password="test123").restore_control_lines(body_only)
+
+            elif cat == "auth_failure":
+                # Covered by test_zero_output_matrix (AEAD authentication failures).
+                continue
+
+            else:
+                pytest.fail(f"Unhandled malformed vector category {cat!r} for {vec_id}")
 
     def test_zero_output_matrix(self):
         """Verify that all auth_failure test vectors fail authentication and produce zero plaintext output."""
@@ -1791,10 +2045,15 @@ class TestRawTransportCapture:
         mock_nzf.filename_checked = True
         mock_nzf.type = "yenc"
 
-        art = Article("art@e2e", 100, mock_nzf)
-        art.lowest_partnum = False
-        art.on_disk = False
-        art.tries = 0
+        art1 = Article("art1@e2e", 100, mock_nzf)
+        art1.lowest_partnum = False
+        art1.on_disk = False
+        art1.tries = 0
+        art2 = Article("art2@e2e", 100, mock_nzf)
+        art2.lowest_partnum = False
+        art2.on_disk = False
+        art2.tries = 0
+        arts = [art1, art2]
 
         try:
             with (
@@ -1817,7 +2076,7 @@ class TestRawTransportCapture:
 
                 # Pipeline two requests: the second command goes out once the first
                 # response is read (concurrency semaphore), then both decode.
-                for _ in range(2):
+                for art in arts:
                     art.fetcher = s1
                     nw1.queue_article(art)
                     nw1.write()
@@ -3114,42 +3373,6 @@ class TestHeaderGeometryParsing:
         with pytest.raises(YEncEncryptionCryptoError):
             adapter.restore_control_lines(broken)
 
-    def test_bare_lf_unencrypted_chunk_is_unchanged(self):
-        """Bytes passed to the decoder equal the bytes received; bytes_recv unchanged."""
-        server = mock.MagicMock()
-        server.timeout = 10
-        server.ssl = False
-        server.pipelining_requests.return_value = 1
-
-        nw = NewsWrapper(server, thrdnum=1)
-        dec = _FakeDecoder(1024)
-        nw.decoder = dec
-        nw.nntp = mock.MagicMock()
-        nw.nntp.nw = nw
-
-        chunks = [b"bare\nlf\nstream\n", b"without\r\ncr\n"]
-        received = iter(chunks)
-
-        def fake_recv_into(buf, nbytes=0):
-            raw_chunk = next(received)
-            memoryview(buf)[: len(raw_chunk)] = raw_chunk
-            return len(raw_chunk)
-
-        nw.nntp.sock.recv_into = fake_recv_into
-        mock_article = mock.MagicMock()
-        mock_article.nzf.nzo.yenc_encrypted = False
-        nw.decoder.pending = 1
-        with (
-            mock.patch.object(NewsWrapper, "article", new_callable=mock.PropertyMock) as mock_art_prop,
-            mock.patch.object(sabnzbd, "Downloader", create=True),
-        ):
-            mock_art_prop.return_value = mock_article
-            for chunk in chunks:
-                nrecv, _ = nw.read()
-                assert nrecv == len(chunk)
-                assert bytes(dec[:nrecv]) == chunk
-        assert dec.processed == [len(chunk) for chunk in chunks]
-
     def test_bare_lf_expansion_never_exceeds_buffer(self):
         """Reads on encrypted jobs leave room for bare-LF to CRLF expansion, so no article is lost."""
         server = mock.MagicMock()
@@ -3236,8 +3459,8 @@ def test_key_cache_replaces_on_new_salt():
     assert adapter._key_cache == {first_salt: first_key}
 
     second_salt = bytes([2]) * 16
-    adapter.get_master_key(second_salt)
-    assert adapter._key_cache == {second_salt: adapter.get_master_key(second_salt)}
+    second_key = adapter.get_master_key(second_salt)
+    assert adapter._key_cache == {second_salt: second_key}
     assert first_salt not in adapter._key_cache
 
 

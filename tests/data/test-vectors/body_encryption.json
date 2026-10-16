@@ -72,7 +72,7 @@
     },
     {
       "id": "body-vec-04-large-segment",
-      "description": "4096-byte typical Usenet article segment chunk",
+      "description": "4096-byte typical Usenet article segment chunk (primitive-level AEAD vector whose salt intentionally contains 0x0A/0x0D and is not a valid wire salt)",
       "password": "P@ssw0rd with spaces & symbols!#$%",
       "salt_hex": "0102030405060708090a0b0c0d0e0f10",
       "segment_index": 1,

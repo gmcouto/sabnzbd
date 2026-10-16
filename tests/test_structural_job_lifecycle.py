@@ -95,7 +95,7 @@ class TestStructuralErrorJobLifecycle:
 
         yield SimpleNamespace(queue=queue, nzo=nzo, nzf=nzo.files[0])
 
-        for attr in ("NzbQueue", "Downloader", "BPSMeter", "Assembler", "ArticleCache", "Scheduler"):
+        for attr in ("NzbQueue", "Downloader", "BPSMeter", "Assembler", "ArticleCache", "Scheduler", "PostProcessor"):
             delattr(sabnzbd, attr)
 
     def _articles(self, nzo):
@@ -186,7 +186,7 @@ class TestStructuralErrorJobLifecycle:
         assert sabnzbd.PostProcessor.process.call_count == 1
         assert nzo.removed_from_queue, "job stays removed; success cannot revive it"
 
-    def test_structural_error_ends_as_failed_history_with_fail_msg(self, job_env, tmp_path):
+    def test_structural_error_ends_as_failed_history_with_fail_msg(self, job_env):
         """fail_to_history must hand the job to the post-processor with the
         structural fail_msg intact, so it lands as FAILED in history."""
         nzo = job_env.nzo

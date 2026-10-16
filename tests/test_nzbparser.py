@@ -89,7 +89,7 @@ class TestNzbParser:
         assert False
 
     @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
-    def test_separate_yenc_and_archive_passwords(self):
+    def test_nzb_password_and_encryption_flag_parsing(self):
         archive_xml = """<?xml version="1.0" encoding="utf-8"?>
 <nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
  <head><meta type="password">archive_pass</meta></head>
@@ -528,6 +528,172 @@ class TestNzbParser:
             assert result == AddNzbFileResult.OK
             assert len(nzo_ids) == 1
             assert not queue.is_empty()
+        finally:
+            for attr in (
+                "NzbQueue",
+                "Downloader",
+                "BPSMeter",
+                "Assembler",
+                "ArticleCache",
+                "Scheduler",
+                "PostProcessor",
+            ):
+                delattr(sabnzbd, attr)
+
+
+@pytest.mark.usefixtures("clean_cache_dir")
+class TestNzbParserMetadataValidationVectors:
+    """Vendored malformed_inputs.json metadata_validation vectors (metadata-01..03),
+    each driven through the real nzbparser NZB-ingest seam (Body Std v1.2 §8,
+    Control Std v1.2 §5: the METADATA_VALIDATION tier is structural and
+    non-retriable, with zero output).
+
+    The vectors carry no article bytes; each one is defined by its NZB head
+    metadata (provenance/password), which differs per vector and is expressed
+    here per vector id. Ordinary-NZB parsing is the control: with no transport
+    decryption requested, the same head blocks stay plain (Body Std v1.2 §8)."""
+
+    @staticmethod
+    def _make_nzb(meta_entries: list[tuple[str, str]]) -> str:
+        metas = "\n".join(f'  <meta type="{t}">{v}</meta>' for t, v in meta_entries)
+        return f"""<?xml version="1.0" encoding="utf-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
+ <head>
+{metas}
+ </head>
+ <file poster="p@test.com" date="1600000000" subject="test.bin">
+  <segments><segment bytes="1000" number="1">s1@test</segment></segments>
+ </file>
+</nzb>"""
+
+    @staticmethod
+    def _metadata_vector(vec_id: str) -> dict:
+        vector_path = os.path.join(os.path.dirname(__file__), "data", "test-vectors", "malformed_inputs.json")
+        import json
+
+        with open(vector_path, encoding="utf-8") as fh:
+            vectors = {vec["id"]: vec for vec in json.load(fh)["vectors"]}
+        # A missing vendored vector fails here rather than silently skipping the assertion.
+        vec = vectors[vec_id]
+        assert vec["category"] == "metadata_validation", vec_id
+        assert vec["expected_rejection_stage"] == "METADATA_VALIDATION", vec_id
+        assert vec["provider_failover_permitted"] is False, vec_id
+        assert vec["zero_output_required"] is True, vec_id
+        return vec
+
+    @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
+    def test_metadata_01_missing_provenance_vector_ingest_is_plain(self):
+        """metadata-01 (MISSING_ENCRYPTION_PROVENANCE): an NZB with a password but no
+        yenc_encrypted provenance marker makes no transport claim. Body Std v1.2 §8:
+        the marker is the sole provenance gate, so the job ingests as ordinary
+        unencrypted yEnc and the password stays an archive password; no decryption
+        is requested, so there is nothing to refuse at ingest. Vector ids are also
+        exercised by the sibling test below for the positive-provenance control."""
+        vec = self._metadata_vector("metadata-01-missing-provenance")
+        assert vec["expected_error"] == "MISSING_ENCRYPTION_PROVENANCE"
+
+        nzo = NzbObject("metadata_01")
+        nzbparser.nzbfile_parser(
+            _write_nzb_gz(SAB_CACHE_DIR, "metadata_01", self._make_nzb([("password", "archive_pw")])),
+            nzo,
+        )
+        assert nzo.yenc_encrypted is False
+        assert nzo.meta["password"] == ["archive_pw"]
+
+        # Positive control from the same matrix row family: with the provenance
+        # marker present and a password, the identical ingest is encrypted, so the
+        # plain outcome above is caused by the missing marker alone.
+        encrypted = NzbObject("metadata_01_control")
+        nzbparser.nzbfile_parser(
+            _write_nzb_gz(
+                SAB_CACHE_DIR,
+                "metadata_01_control",
+                self._make_nzb([("yenc_encrypted", "true"), ("password", "archive_pw")]),
+            ),
+            encrypted,
+        )
+        assert encrypted.yenc_encrypted is True
+
+    @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
+    def test_metadata_02_false_provenance_vector_ingest_is_plain(self):
+        """metadata-02 (INVALID_ENCRYPTION_PROVENANCE): yenc_encrypted set to a value
+        other than "true" (here "false") is not transport provenance. Body Std v1.2 §8:
+        any value other than "true" (trimmed, ASCII case-insensitive) is treated as a
+        standard unencrypted NZB, so this ingests plain with an archive password."""
+        vec = self._metadata_vector("metadata-02-false-provenance")
+        assert vec["expected_error"] == "INVALID_ENCRYPTION_PROVENANCE"
+
+        nzo = NzbObject("metadata_02")
+        nzbparser.nzbfile_parser(
+            _write_nzb_gz(
+                SAB_CACHE_DIR,
+                "metadata_02",
+                self._make_nzb([("yenc_encrypted", "false"), ("password", "archive_pw")]),
+            ),
+            nzo,
+        )
+        assert nzo.yenc_encrypted is False
+        assert nzo.meta["password"] == ["archive_pw"]
+
+    @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
+    def test_metadata_03_missing_password_vector_ingest_rejected(self):
+        """metadata-03 (MISSING_PASSWORD): yenc_encrypted=true with no password meta
+        (and no other password source on the job) must be refused at ingest as a
+        structural METADATA_VALIDATION failure, before any article fetch."""
+        from sabnzbd.encryption import YEncEncryptionStructuralError
+
+        vec = self._metadata_vector("metadata-03-missing-password")
+        assert vec["expected_error"] == "MISSING_PASSWORD"
+
+        nzo = NzbObject("metadata_03")
+        with pytest.raises(YEncEncryptionStructuralError, match="MISSING_PASSWORD"):
+            nzbparser.nzbfile_parser(
+                _write_nzb_gz(
+                    SAB_CACHE_DIR,
+                    "metadata_03",
+                    self._make_nzb([("yenc_encrypted", "true")]),
+                ),
+                nzo,
+            )
+
+    @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
+    def test_metadata_03_missing_password_vector_ingest_lifecycle(self, monkeypatch, tmp_path, caplog):
+        """metadata-03 through the real process_single_nzb ingestion path: the job is
+        logged as an ERROR, is not added to the queue, and no article scheduling or
+        provider query happens (structural refusal before NNTP)."""
+        monkeypatch.setattr(sabnzbd.cfg.admin_dir, "get_path", lambda: str(tmp_path / "admin"))
+        monkeypatch.setattr(sabnzbd.cfg.download_dir, "get_path", lambda: str(tmp_path / "downloads"))
+        os.makedirs(str(tmp_path / "admin"), exist_ok=True)
+        os.makedirs(str(tmp_path / "downloads"), exist_ok=True)
+
+        sabnzbd.config.ConfigCat("*", {})
+        sabnzbd.Scheduler = mock.Mock()
+        sabnzbd.Scheduler.analyse = mock.Mock(return_value=False)
+        sabnzbd.ArticleCache = mock.Mock()
+        sabnzbd.Assembler = mock.Mock()
+        sabnzbd.BPSMeter = mock.Mock()
+        sabnzbd.Downloader = SimpleNamespace(paused=False, servers=[])
+        sabnzbd.Downloader.highest_server = lambda server: True
+        queue = NzbQueue()
+        sabnzbd.NzbQueue = queue
+        sabnzbd.PostProcessor = mock.Mock()
+        try:
+            nzb_path = _write_nzb_gz(
+                SAB_CACHE_DIR,
+                "metadata_03_ingest",
+                self._make_nzb([("yenc_encrypted", "true")]),
+            )
+            caplog.set_level(logging.DEBUG)
+            caplog.clear()
+            with mock.patch.object(NzbQueue, "get_articles", wraps=queue.get_articles) as get_articles_mock:
+                result, nzo_ids = nzbparser.process_single_nzb("metadata_03_ingest.nzb.gz", path=nzb_path, keep=True)
+                assert result == AddNzbFileResult.ERROR
+                assert nzo_ids == []
+                assert get_articles_mock.call_count == 0
+            assert any(record.levelno == logging.ERROR for record in caplog.records)
+            assert "Structural yEnc-encryption failure" in caplog.text
+            assert "MISSING_PASSWORD" in caplog.text
+            assert queue.is_empty()
         finally:
             for attr in (
                 "NzbQueue",

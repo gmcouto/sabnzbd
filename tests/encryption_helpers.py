@@ -1,9 +1,6 @@
 """Encryption helpers for tests (FF1 encryption and test control-key derivation)."""
 
-import hashlib
-import hmac
 import math
-import struct
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
@@ -72,10 +69,3 @@ def ff1_encrypt(key: bytes, tweak: bytes, plaintext_bytes: bytes, radix: int = 2
 
 def encrypt_control_line(plaintext: bytes, enc_key: bytes, tweak: bytes, radix: int = 253) -> bytes:
     return ff1_encrypt(enc_key, tweak, plaintext, radix)
-
-
-def derive_control_keys(master_key: bytes, segment_index: int, line_index: int) -> tuple[bytes, bytes]:
-    enc_key = hmac.new(master_key, b"yenc-control key", hashlib.sha256).digest()
-    tweak_msg = b"yenc-control tweak" + struct.pack(">I", segment_index) + struct.pack(">I", line_index)
-    tweak = hmac.new(master_key, tweak_msg, hashlib.sha256).digest()[:8]
-    return enc_key, tweak
