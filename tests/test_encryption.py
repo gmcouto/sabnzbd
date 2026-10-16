@@ -1588,13 +1588,15 @@ class _PipelinedNNTPServer(MockArticleNNTPServer):
 class _MixedPipelinedNNTPServer:
     """NNTP server that answers each pipelined BODY command with the per-Message-ID body."""
 
-    def __init__(self, bodies: dict):
+    def __init__(self, bodies: dict, coalesce=False, plain_bytes_early=0):
         self.host = "127.0.0.1"
         self.port = 0
         self.server_socket = None
         self._stop = threading.Event()
         self._thread = None
         self.bodies = bodies  # msgid (without <>) -> response body bytes
+        self.coalesce = coalesce
+        self.plain_bytes_early = plain_bytes_early
         self.commands = []
 
     def start(self):
@@ -1616,6 +1618,7 @@ class _MixedPipelinedNNTPServer:
                 pass
 
     def _handle_client(self, conn):
+        responses = []
         try:
             conn.sendall(b"200 Welcome\r\n")
             while not self._stop.is_set():
@@ -1633,7 +1636,17 @@ class _MixedPipelinedNNTPServer:
                         self.commands.append(command)
                         msgid = command[len(b"BODY <") : -1].decode()
                         body = self.bodies[msgid]
-                        conn.sendall(b"222 0 <%s>\r\n" % msgid.encode() + body + b".\r\n")
+                        response = b"222 0 <%s>\r\n" % msgid.encode() + body + b".\r\n"
+                        if self.coalesce:
+                            if not responses and self.plain_bytes_early:
+                                conn.sendall(response[: self.plain_bytes_early])
+                                response = response[self.plain_bytes_early :]
+                            responses.append(response)
+                            if len(responses) == 2:
+                                conn.sendall(b"".join(responses))
+                                responses.clear()
+                        else:
+                            conn.sendall(response)
                     elif command.startswith(b"authinfo"):
                         conn.sendall(b"281 Auth accepted\r\n")
         except Exception:
@@ -1820,8 +1833,20 @@ class TestRawTransportCapture:
         finally:
             srv.stop()
 
-    @pytest.mark.parametrize("partial_read", [0, 32, 60])
-    def test_mixed_pipelined_plain_and_encrypted_articles_both_decode(self, partial_read):
+    @pytest.mark.parametrize(
+        ("partial_read", "coalesce", "bare_lf"),
+        [
+            pytest.param(0, False, False, id="existing-0"),
+            pytest.param(32, False, False, id="existing-32"),
+            pytest.param(60, False, False, id="existing-60"),
+            pytest.param(0, True, True, id="coalesced-lf"),
+            pytest.param(0, True, False, id="coalesced-crlf"),
+            pytest.param(10, True, True, id="status-split-lf"),
+            pytest.param(100, True, True, id="body-split-lf"),
+            pytest.param(len(b"222 0 <plain@e2e>\r"), True, True, id="crlf-arming-split"),
+        ],
+    )
+    def test_mixed_pipelined_plain_and_encrypted_articles_both_decode(self, partial_read, coalesce, bare_lf):
         """A large plain article pipelined ahead of an encrypted article on one connection
         must not release the encrypted article's journal bound: both decode to plaintext.
 
@@ -1841,12 +1866,16 @@ class TestRawTransportCapture:
         )
         plaintext = b"mixed pipelined encrypted payload!"
         enc_body, *_ = _encrypted_wire(password=password, plaintext=plaintext, salt=b"=ybegin ABCDEFGH")
+        if bare_lf:
+            enc_body = enc_body.replace(b"\r\n", b"\n")
 
         srv = _MixedPipelinedNNTPServer(
             {
                 "plain@e2e": plain_body,
                 "enc@e2e": enc_body,
-            }
+            },
+            coalesce=coalesce,
+            plain_bytes_early=partial_read,
         )
         srv.start()
         s1 = Server(
@@ -2096,6 +2125,32 @@ class TestRawTransportCapture:
         finally:
             srv.stop()
 
+    @pytest.mark.parametrize("nbytes", [0, 900])
+    def test_ordinary_only_reads_keep_bytes_and_full_buffer(self, nbytes):
+        """No encrypted request: bare LF stays untouched and read limits stay upstream-exact."""
+        server = mock.MagicMock(timeout=10, ssl=False)
+        server.pipelining_requests.return_value = 1
+        nw = NewsWrapper(server, thrdnum=1)
+        dec = _FakeDecoder(1024)
+        nw.decoder = dec
+        nw.nntp = mock.MagicMock()
+        nw.nntp.nw = nw
+        raw = b"ordinary\nbare LF\r"
+
+        def recv_into(buffer, nbytes):
+            assert buffer is dec
+            buffer[: len(raw)] = raw
+            return len(raw)
+
+        nw.nntp.sock.recv_into.side_effect = recv_into
+        with mock.patch.object(sabnzbd, "Downloader", create=True):
+            count, _ = nw.read(nbytes=nbytes)
+        nw.nntp.sock.recv_into.assert_called_once_with(dec, nbytes=nbytes)
+        assert count == len(raw)
+        assert bytes(dec[:count]) == raw
+        assert dec.processed == [len(raw)]
+        assert not nw.raw_capture.active
+
     def test_plain_substitution_through_transport_still_fails_closed(self):
         """An ordinary yEnc article served to a declared-encrypted job through real
         transport must still release no plaintext (raw reconstruction fails closed)."""
@@ -2154,6 +2209,43 @@ class TestRawTransportCapture:
             nw.hard_reset(wait=False)
 
         assert nw.raw_capture.retained == 0
+
+    def test_stale_cr_flag_cleared_by_reset_after_partial_read(self):
+        """A read ending in bare '\\r' leaves the split-CRLF flag set; hard_reset rebuilds the
+        wrapper, so a later CRLF split must not see the stale flag (which would turn '\\n'
+        into '\\r\\r\\n' if it survived on the fresh connection)."""
+        server = mock.MagicMock(timeout=10, ssl=False)
+        server.pipelining_requests.return_value = 1
+        nw = NewsWrapper(server, thrdnum=1)
+        nw.decoder = _FakeDecoder(1024)
+        nw.nntp = mock.MagicMock()
+        nw.nntp.nw = nw
+        art = mock.MagicMock(spec=Article)
+        art.bytes = 1000
+        art.nzf.nzo.yenc_encrypted = True
+        art.nzf.nzo.precheck = False
+        art.nzf.nzo.removed_from_queue = False
+        nw.raw_capture.arm(art)
+
+        nw.nntp.sock.recv_into.side_effect = lambda buf, nbytes: (buf.__setitem__(slice(0, 1), b"\r") or 1)
+        with mock.patch.object(sabnzbd, "Downloader", create=True) as mock_dl:
+            mock_dl.remove_socket = lambda nw: None
+            nw.read()
+            assert nw._prev_chunk_ended_with_cr
+            nw.hard_reset(wait=False)
+        assert not nw._prev_chunk_ended_with_cr
+
+    def test_stale_cr_flag_cleared_by_init_connect(self):
+        """init_connect recreates the decoder for a new connection; the split-CRLF flag
+        must not carry over."""
+        server = mock.MagicMock(timeout=10, ssl=False, addrinfo=("127.0.0.1", 119))
+        server.pipelining_requests.return_value = 1
+        nw = NewsWrapper(server, thrdnum=1)
+        nw.decoder = _FakeDecoder(1024)
+        nw._prev_chunk_ended_with_cr = True
+        with mock.patch("sabnzbd.newswrapper.NNTP"):
+            nw.init_connect()
+        assert not nw._prev_chunk_ended_with_cr
 
     def test_raw_capture_bound_trips_fail_closed(self):
         """The enforced article bound drops the journal instead of growing it; take()

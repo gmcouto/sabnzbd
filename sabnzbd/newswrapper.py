@@ -356,6 +356,8 @@ class NewsWrapper:
 
         # Construct buffer and NNTP object
         self.decoder = sabctools.Decoder(NNTP_BUFFER_SIZE)
+        # New connection: no previous chunk, so no CRLF can be split across the reset
+        self._prev_chunk_ended_with_cr = False
         self.nntp = NNTP(self, self.server.addrinfo)
         self.timeout = time.time() + self.server.timeout
 
@@ -627,7 +629,9 @@ class NewsWrapper:
             return 0, None
 
         article = self.article
-        encrypted = bool(article and article.nzf.nzo.yenc_encrypted)
+        encrypted = bool(article and article.nzf.nzo.yenc_encrypted) or bool(
+            self.raw_capture is not None and self.raw_capture.active
+        )
         if encrypted:
             # Bare LF is rewritten to CRLF below, which at most doubles a chunk. Reading at most
             # half of the free buffer guarantees the rewritten chunk always fits.
@@ -655,13 +659,13 @@ class NewsWrapper:
         # A CRLF can also be split across TCP chunks: a chunk that begins with a lone
         # '\n' is the second half of a CRLF when the previous chunk ended with '\r',
         # and must be left byte-exact or the article terminator is corrupted.
+        # The split-CRLF flag is tracked from every raw chunk, so a '\r' received while
+        # no response was encrypted yet pairs correctly with a '\n' that arrives once
+        # an encrypted article is armed mid-connection (DL-R9-1).
+        mv = memoryview(self.decoder)
         if encrypted:
-            mv = memoryview(self.decoder)
             raw_chunk = bytes(mv[:bytes_recv])
             split_crlf = raw_chunk.startswith(b"\n") and self._prev_chunk_ended_with_cr
-            # '\r' as the final byte is preserved by the bare-LF rewrite below, so tracking
-            # it from the raw chunk stays valid across normalized and unnormalized chunks.
-            self._prev_chunk_ended_with_cr = raw_chunk.endswith(b"\r")
             # A '\n' is a bare LF only when not preceded by '\r', either inside this chunk
             # or by the previous chunk's trailing '\r' for a CRLF split across chunks.
             detect_chunk = (b"\r" + raw_chunk) if split_crlf else raw_chunk
@@ -673,6 +677,9 @@ class NewsWrapper:
                     norm_chunk = norm_chunk[1:]
                 mv[: len(norm_chunk)] = norm_chunk
                 bytes_recv = len(norm_chunk)
+        # The trailing '\r' is preserved by the bare-LF rewrite above, so tracking the
+        # flag from the raw chunk stays valid across normalized and unnormalized chunks.
+        self._prev_chunk_ended_with_cr = mv[bytes_recv - 1] == b"\r"[0]
 
         # Raw byte journal for declared-encrypted articles: every normalized byte handed
         # to the native Decoder is journaled so an article consumed by native yEnc
