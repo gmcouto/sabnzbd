@@ -1820,13 +1820,19 @@ class TestRawTransportCapture:
         finally:
             srv.stop()
 
-    def test_mixed_pipelined_plain_and_encrypted_articles_both_decode(self):
+    @pytest.mark.parametrize("partial_read", [0, 32, 60])
+    def test_mixed_pipelined_plain_and_encrypted_articles_both_decode(self, partial_read):
         """A large plain article pipelined ahead of an encrypted article on one connection
-        must not release the encrypted article's journal bound: both decode to plaintext."""
+        must not release the encrypted article's journal bound: both decode to plaintext.
+
+        With a partial read before the encrypted request is queued, the journal starts
+        mid-response; partial_read=0 is the control where both responses arrive after
+        arming. Splits inside the status line (0/32) and inside the yEnc body (60) are
+        both exercised; all bytes stay below the journal bound to isolate alignment."""
         import sabctools
 
         password = "mixed_pipelined_transport"
-        plain_data = b"0123456789" * 400  # ~4 KB plain article
+        plain_data = b"0123456789" * 100  # ~1 KB plain article
         encoded, crc = sabctools.yenc_encode(plain_data)
         plain_body = (
             b"=ybegin line=128 size=%d name=plain.bin\r\n" % len(plain_data)
@@ -1896,6 +1902,8 @@ class TestRawTransportCapture:
 
         plain_art = _make_article("plain@e2e", False)
         enc_art = _make_article("enc@e2e", True)
+        plain_art.bytes = len(plain_data)
+        enc_art.bytes = len(plaintext)
 
         try:
             with (
@@ -1924,15 +1932,166 @@ class TestRawTransportCapture:
                     art.fetcher = s1
                     nw1.queue_article(art)
                     nw1.write()
+                    if partial_read and art is plain_art:
+                        nw1.read(nbytes=partial_read)
                 for _ in range(8):
                     nw1.read()
                     nw1.write()
-                    if mock_cache.save_article.call_count >= 2:
+                    if mock_queue.register_article.call_count >= 2:
                         break
 
                 assert mock_cache.save_article.call_count == 2
                 saved = {call.args[0].article: bytes(call.args[1]) for call in mock_cache.save_article.call_args_list}
                 assert saved["plain@e2e"] == plain_data
+                assert saved["enc@e2e"] == plaintext
+        finally:
+            srv.stop()
+
+    def test_rearm_after_full_release_with_next_ordinary_response_partly_received(self):
+        """An encrypted article armed after a full release (journal cleared) while the
+        next ordinary response has already partly arrived: the new journal start offset
+        keeps that ordinary response's absent prefix out of take(), and both the
+        ordinary article and the later encrypted article still save exact plaintext."""
+        import sabctools
+
+        password = "rearm_release_transport"
+        plain_data = b"0123456789" * 100  # ~1 KB plain article
+        encoded, crc = sabctools.yenc_encode(plain_data)
+        plain_body = (
+            b"=ybegin line=128 size=%d name=plain.bin\r\n" % len(plain_data)
+            + encoded
+            + b"\r\n=yend size=%d crc32=%08x\r\n" % (len(plain_data), crc)
+        )
+        plaintext = b"rearm release encrypted payload!"
+        enc_body, *_ = _encrypted_wire(password=password, plaintext=plaintext, salt=b"=ybegin ABCDEFGH")
+
+        srv = _MixedPipelinedNNTPServer(
+            {
+                "plain@e2e": plain_body,
+                "plain2@e2e": plain_body,
+                "enc@e2e": enc_body,
+            }
+        )
+        srv.start()
+        s1 = Server(
+            server_id="srv_rearm",
+            displayname="Rearm Server",
+            host=srv.host,
+            port=srv.port,
+            timeout=5,
+            threads=0,
+            priority=0,
+            use_ssl=False,
+            ssl_verify=0,
+            ssl_ciphers="",
+            pipelining_requests=mock.Mock(return_value=2),
+        )
+        s1.addrinfo = AddrInfo(*socket.getaddrinfo(srv.host, srv.port, socket.AF_INET, socket.SOCK_STREAM)[0])
+        s1.active = True
+
+        mock_downloader = mock.MagicMock(spec=Downloader)
+        mock_downloader.servers = [s1]
+        mock_downloader.reset_nw = lambda nw, *args, **kwargs: None
+        mock_downloader.finish_connect_nw = lambda nw, resp: Downloader.finish_connect_nw(mock_downloader, nw, resp)
+        mock_downloader.decode = lambda article, resp: Downloader.decode(article, resp)
+        mock_downloader.modify_socket = lambda nw, event: None
+        mock_downloader.remove_socket = lambda nw: None
+        mock_downloader.no_active_jobs = lambda: False
+        mock_downloader.shutdown = False
+        mock_downloader.paused_for_postproc = False
+        mock_downloader.force_disconnect = False
+
+        mock_bps = mock.MagicMock()
+        mock_cache = mock.MagicMock()
+        mock_queue = mock.MagicMock()
+
+        def _make_article(msgid, encrypted):
+            nzo = mock.MagicMock()
+            nzo.password = password if encrypted else None
+            nzo.yenc_encrypted = encrypted
+            nzo.precheck = False
+            nzo.removed_from_queue = False
+            nzo.status = "active"
+            nzo.priority = 0
+            nzo.update_download_stats = mock.MagicMock()
+            nzf = mock.MagicMock()
+            nzf.nzo = nzo
+            nzf.filename_checked = True
+            nzf.type = "yenc"
+            art = Article(msgid, 100, nzf)
+            art.lowest_partnum = False
+            art.on_disk = False
+            art.tries = 0
+            return art
+
+        plain_art = _make_article("plain@e2e", False)
+        plain2_art = _make_article("plain2@e2e", False)
+        enc_art = _make_article("enc@e2e", True)
+        plain_art.bytes = len(plain_data)
+        plain2_art.bytes = len(plain_data)
+        enc_art.bytes = len(plaintext)
+
+        try:
+            with (
+                mock.patch.object(sabnzbd, "Downloader", mock_downloader, create=True),
+                mock.patch.object(sabnzbd, "BPSMeter", mock_bps, create=True),
+                mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
+                mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
+                mock.patch.object(sabnzbd, "WriteMonitor", mock.MagicMock(allow_direct_decode=False), create=True),
+            ):
+                nw1 = NewsWrapper(s1, thrdnum=1)
+                s1.idle_threads.add(nw1)
+                nw1.init_connect()
+                for _ in range(50):
+                    if nw1.connected:
+                        break
+                    time.sleep(0.05)
+                nw1.nntp.sock.setblocking(True)
+                nw1.nntp.sock.settimeout(2)
+                nw1.read()
+                assert nw1.ready
+
+                # Stage 1: only the ordinary article is requested, and the journal is
+                # never armed for it (no journaling of ordinary traffic). Its response
+                # completes and its bound-free stream slice is consumed; the journal
+                # then sits fully released (inactive) with no stored bytes.
+                plain_art.fetcher = s1
+                nw1.queue_article(plain_art)
+                nw1.write()
+                for _ in range(8):
+                    nw1.read()
+                    nw1.write()
+                    if mock_queue.register_article.call_count >= 1:
+                        break
+                assert not nw1.raw_capture.active
+
+                # Stage 2: the next ordinary article is pipelined and its response
+                # begins arriving BEFORE the encrypted article is armed: a partial
+                # read takes some of that response's bytes while the journal is
+                # inactive (its storage was already cleared by the full release).
+                plain2_art.fetcher = s1
+                nw1.queue_article(plain2_art)
+                nw1.write()
+                nw1.read(nbytes=20)
+
+                # Stage 3: now the encrypted article is armed and requested; its
+                # response follows the partly-received ordinary one. take() must skip
+                # the absent prefix of the ordinary response and still slice the
+                # encrypted response exactly.
+                enc_art.fetcher = s1
+                nw1.queue_article(enc_art)
+                nw1.write()
+                for _ in range(8):
+                    nw1.read()
+                    nw1.write()
+                    if any(call.args[0].article == "enc@e2e" for call in mock_cache.save_article.call_args_list):
+                        break
+
+                assert mock_queue.register_article.call_count >= 2
+                assert mock_cache.save_article.call_count == 3
+                saved = {call.args[0].article: bytes(call.args[1]) for call in mock_cache.save_article.call_args_list}
+                assert saved["plain@e2e"] == plain_data
+                assert saved["plain2@e2e"] == plain_data
                 assert saved["enc@e2e"] == plaintext
         finally:
             srv.stop()

@@ -76,15 +76,30 @@ class _RawBodyCapture:
     Only articles of a declared-encrypted job journal (encrypted-only), with an
     enforced per-article byte bound: a bound trip drops the journal and later slices
     come back empty, which fails the encrypted article closed - never wrong output.
+
+    The journal can start (or restart) while a response is already partly received:
+    the first arm, a re-arm after release() cleared the storage, and a re-arm after
+    set_inactive() on reset (which also restarts the decoder and its stream). To stay
+    aligned at every (re)start, the capture keeps two connection-owned running counts
+    of the normalized decoder stream: every byte handed to the decoder (even while
+    inactive, cheap) and every byte already attributed to a completed response. When
+    the journal starts, its start offset is recorded; take() then discards only the
+    part of a response the journal actually holds, so a response that began before the
+    journal started (necessarily not an encrypted article: arming precedes its own
+    command) never misaligns later responses (DL-R8-1).
     """
 
-    __slots__ = ("_chunks", "_retained", "_bound", "_dropped")
+    __slots__ = ("_chunks", "_retained", "_bound", "_dropped", "_processed", "_consumed", "_journal_start")
 
     def __init__(self):
         self._chunks: list[bytes] = []
         self._retained = 0
         self._bound = 0
         self._dropped = False
+        # Connection-owned stream accounting, in normalized decoder bytes
+        self._processed = 0  # total bytes handed to the decoder
+        self._consumed = 0  # bytes attributed to completed responses (FIFO)
+        self._journal_start = 0  # _processed value when the journal (re)started
 
     @property
     def active(self) -> bool:
@@ -112,8 +127,13 @@ class _RawBodyCapture:
 
         Pipelined requests each add their own bound while in flight; the journal is
         shared and consumed FIFO per response, so arming never discards another
-        in-flight article's bytes.
+        in-flight article's bytes. If the journal was not running, record where in
+        the decoder stream it starts, so take() can skip bytes received before
+        activation (a response that began earlier is not this encrypted article's
+        response, since arming precedes the command going out).
         """
+        if not self.active:
+            self._journal_start = self._processed
         self._bound += self._article_bound(article)
 
     def release(self, article: "sabnzbd.nzb.Article") -> None:
@@ -125,14 +145,22 @@ class _RawBodyCapture:
             self._dropped = False
 
     def set_inactive(self) -> None:
-        """Release all storage; used on connection reset."""
+        """Release all storage; used on connection reset.
+
+        The decoder and its byte stream are also replaced on reset, so the stream
+        accounting restarts with them.
+        """
         self._chunks.clear()
         self._retained = 0
         self._bound = 0
         self._dropped = False
+        self._processed = 0
+        self._consumed = 0
+        self._journal_start = 0
 
     def add(self, chunk: bytes, /) -> None:
         """Journal one normalized transport chunk (called on the process() seam)."""
+        self._processed += len(chunk)
         if not self._bound or self._dropped:
             return
         self._retained += len(chunk)
@@ -146,11 +174,36 @@ class _RawBodyCapture:
         self._chunks.append(bytes(chunk))
 
     def take(self, nbytes: int) -> Optional[bytes]:
-        """Return the next nbytes journaled bytes (one response slice), or None."""
-        if not nbytes or self._dropped or self._retained < nbytes:
+        """Return the next nbytes journaled bytes (one response slice), or None.
+
+        Every completed response consumes its bytes_read from the connection-owned
+        stream, even while the journal is inactive (None) - that keeps _consumed
+        aligned so a later journal start offset is correct. The requested range is
+        expressed in whole-stream coordinates: only the part overlapping the journal
+        is consumed. A response that began before the journal started is necessarily
+        not an encrypted article's response (arming precedes the command going out),
+        so skipping its absent prefix (empty slice) keeps later responses aligned
+        instead of misattributing bytes. A request the journal cannot satisfy fails
+        closed: None, with the stream position left untouched.
+        """
+        if not nbytes:
+            return None
+        end = self._consumed + nbytes
+        if not self._bound or self._dropped:
+            # Inactive or dropped journal: account the response, return no data.
+            self._consumed = end
+            return None
+        skip = max(0, min(self._journal_start - self._consumed, nbytes))
+        if skip >= nbytes:
+            # Nothing of this response was journaled; the response is accounted so
+            # later responses stay aligned.
+            self._consumed = end
+            return b""
+        need = nbytes - skip
+        if self._retained < need:
             return None
         out = bytearray()
-        remaining = nbytes
+        remaining = need
         while remaining:
             chunk = self._chunks[0]
             if len(chunk) <= remaining:
@@ -161,7 +214,8 @@ class _RawBodyCapture:
                 out += chunk[:remaining]
                 self._chunks[0] = chunk[remaining:]
                 remaining = 0
-        self._retained -= nbytes
+        self._consumed = end
+        self._retained -= need
         return bytes(out)
 
 
@@ -449,7 +503,10 @@ class NewsWrapper:
         """
         raw_capture = self.raw_capture
         raw: Optional[bytes] = None
-        if raw_capture is not None and raw_capture.active and response.bytes_read:
+        if raw_capture is not None and response.bytes_read:
+            # Every completed response consumes its slice from the connection-owned
+            # stream (even while the journal is inactive) so the accounting stays
+            # aligned across journal (re)starts (DL-R8-1).
             raw = raw_capture.take(response.bytes_read)
             if article is not None and _captures_body(article):
                 raw_capture.release(article)
@@ -458,9 +515,11 @@ class NewsWrapper:
             return response
         if response.lines or response.status_code != 222 or not raw:
             # Lines present (encrypted wire not autodetected): nothing to reconstruct.
-            # Non-BODY statuses are transport bookkeeping, not an article. A missing
-            # slice (bound tripped) leaves the real response, whose bogus native output
-            # the existing guard rejects closed.
+            # Non-BODY statuses are transport bookkeeping, not an article. An empty
+            # slice means this response began before the journal started (it cannot be
+            # this encrypted article's response) or the bound tripped; either leaves
+            # the real response, whose bogus native output the existing guard rejects
+            # closed.
             return response
         raw_lines = _raw_body_lines(raw)
         if not raw_lines:
@@ -618,9 +677,11 @@ class NewsWrapper:
         # Raw byte journal for declared-encrypted articles: every normalized byte handed
         # to the native Decoder is journaled so an article consumed by native yEnc
         # auto-detection can still be reconstructed from raw bytes (DL-R7-2). Bound to
-        # the declared article size; ordinary releases never arm the journal.
+        # the declared article size; ordinary releases never arm the journal. The
+        # connection-owned stream accounting runs even while the journal is inactive,
+        # so a journal that starts mid-response stays aligned (DL-R8-1).
         raw_capture = self.raw_capture
-        if raw_capture is not None and raw_capture.active:
+        if raw_capture is not None:
             raw_capture.add(memoryview(self.decoder)[:bytes_recv])
 
         self.decoder.process(bytes_recv)
