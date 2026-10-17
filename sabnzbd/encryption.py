@@ -291,12 +291,26 @@ def _ybegin_has_part(header_tokens: list[bytes]) -> bool:
     return any(token.startswith(b"part=") for token in header_tokens)
 
 
+_GEOMETRY_KEYWORDS = frozenset((b"part", b"size", b"begin", b"end"))
+
+
 def _keyword_values(tokens: list[bytes]) -> dict[bytes, bytes]:
-    """Map keyword=value tokens to their raw values; tokens without '=' are ignored."""
+    """Map keyword=value tokens to their raw values; tokens without '=' are ignored.
+
+    Conflicting duplicates of the encrypted-path geometry keywords (``part=``/``size=``
+    on =ybegin, ``begin=``/``end=`` on =ypart) fail closed under PROVIDER_FAILOVER
+    (Body Std v1.2 §2.1): every occurrence must be well-formed and equal. Same-value
+    duplicates are accepted and yield that value. This helper is only used on the
+    encrypted path (``extract_and_remove_yencryption``), so ordinary yEnc is unchanged.
+    """
     values: dict[bytes, bytes] = {}
     for token in tokens:
         key, sep, value = token.partition(b"=")
         if sep:
+            if key in _GEOMETRY_KEYWORDS and key in values and values[key] != value:
+                raise YEncEncryptionCryptoError(
+                    f"Conflicting duplicate {key.decode()}= keywords: {values[key]!r} vs {value!r}"
+                )
             values[key] = value
     return values
 
@@ -388,6 +402,8 @@ def extract_and_remove_yencryption(yenc_block: bytes) -> tuple[dict[str, Any], b
         ypart_values = _keyword_values(line2.split())
         part_begin = _required_int(ypart_values, b"begin", "=ypart")
         part_end = _required_int(ypart_values, b"end", "=ypart")
+        if part_begin < 1:
+            raise YEncEncryptionCryptoError("=ypart begin is less than 1")
         if part_end < part_begin:
             raise YEncEncryptionCryptoError("=ypart end is before begin")
         segment_bytes = part_end - part_begin + 1

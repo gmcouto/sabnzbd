@@ -172,6 +172,7 @@ def process_nzb_archive_file(
     """
     nzo_ids = []
     added_nzos: list[NzbObject] = []
+    structural_failure = False
     if catdir is None:
         catdir = cat
     filename, cat = name_to_cat(filename, catdir)
@@ -240,6 +241,11 @@ def process_nzb_archive_file(
                         # Duplicate or unwanted extension directed to history
                         sabnzbd.NzbQueue.fail_to_history(err.nzo)
                         nzo_ids.append(err.nzo.nzo_id)
+                    except YEncEncryptionStructuralError as err:
+                        # Structural yEnc-encryption metadata failure (e.g. encrypted NZB without password):
+                        # rejects ingestion before contacting any NNTP server
+                        logging.error(T("Structural yEnc-encryption failure in %s: %s"), name, err)
+                        structural_failure = True
                     except Exception:
                         # Something else is wrong, show error
                         logging.error(T("Error while adding %s, removing"), name, exc_info=True)
@@ -270,7 +276,7 @@ def process_nzb_archive_file(
 
     # If all were rejected/empty/etc, update status
     if not nzo_ids:
-        status = AddNzbFileResult.NO_FILES_FOUND
+        status = AddNzbFileResult.ERROR if structural_failure else AddNzbFileResult.NO_FILES_FOUND
 
     return status, nzo_ids
 
@@ -551,7 +557,10 @@ def nzbfile_parser(full_nzb_path: str, nzo):
         attr_pw = getattr(nzo, "password", None)
         has_attr_pw = isinstance(attr_pw, str) and bool(attr_pw.strip())
 
-        if not (meta_pws or has_attr_pw):
+        # On reuse (retry/repair/send_back) the saved password is restored only after
+        # parsing (load_attribs), so a missing password here must not reject: the job
+        # still fails closed at first-article decode if no password is ever available.
+        if not getattr(nzo, "reuse", None) and not (meta_pws or has_attr_pw):
             raise YEncEncryptionStructuralError(
                 "MISSING_PASSWORD: NZB declares yenc_encrypted=true but no password meta was supplied"
             )

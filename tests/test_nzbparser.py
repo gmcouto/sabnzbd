@@ -22,6 +22,7 @@ tests.test_nzbparser - Tests of basic NZB parsing
 import gzip
 import logging
 import os
+import zipfile
 from types import SimpleNamespace
 from unittest import mock
 import pytest
@@ -493,6 +494,51 @@ class TestNzbParser:
             assert result == AddNzbFileResult.OK
             assert len(nzo_ids) == 1
             assert not queue.is_empty()
+        finally:
+            for attr in (
+                "NzbQueue",
+                "Downloader",
+                "BPSMeter",
+                "Assembler",
+                "ArticleCache",
+                "Scheduler",
+                "PostProcessor",
+            ):
+                delattr(sabnzbd, attr)
+
+    @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
+    def test_encrypted_structural_failure_in_zip_archive_returns_error(self, monkeypatch, tmp_path):
+        """SAB13-01: a structurally invalid encrypted NZB inside a zip archive maps to
+        AddNzbFileResult.ERROR (not NO_FILES_FOUND) and leaves no job folder."""
+        monkeypatch.setattr(sabnzbd.cfg.admin_dir, "get_path", lambda: str(tmp_path / "admin"))
+        monkeypatch.setattr(sabnzbd.cfg.download_dir, "get_path", lambda: str(tmp_path / "downloads"))
+        os.makedirs(str(tmp_path / "admin"), exist_ok=True)
+        downloads_dir = tmp_path / "downloads"
+        os.makedirs(str(downloads_dir), exist_ok=True)
+
+        sabnzbd.config.ConfigCat("*", {})
+        sabnzbd.Scheduler = mock.Mock()
+        sabnzbd.Scheduler.analyse = mock.Mock(return_value=False)
+        sabnzbd.ArticleCache = mock.Mock()
+        sabnzbd.Assembler = mock.Mock()
+        sabnzbd.BPSMeter = mock.Mock()
+        sabnzbd.Downloader = SimpleNamespace(paused=False, servers=[])
+        sabnzbd.Downloader.highest_server = lambda server: True
+        queue = NzbQueue()
+        sabnzbd.NzbQueue = queue
+        sabnzbd.PostProcessor = mock.Mock()
+        try:
+            nzb_xml = _make_nzb([("yenc_encrypted", "true")])
+            zip_path = str(tmp_path / "archive.zip")
+            with zipfile.ZipFile(zip_path, "w") as zf:
+                zf.writestr("inner.nzb", nzb_xml)
+
+            result, nzo_ids = nzbparser.process_nzb_archive_file("archive.zip", path=zip_path, keep=True)
+            assert result == AddNzbFileResult.ERROR
+            assert nzo_ids == []
+            assert queue.is_empty()
+            # No job folder left in the downloads dir
+            assert os.listdir(str(downloads_dir)) == []
         finally:
             for attr in (
                 "NzbQueue",

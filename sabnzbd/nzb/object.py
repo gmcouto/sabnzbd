@@ -413,7 +413,8 @@ class NzbObject(TryList):
             try:
                 sabnzbd.nzbparser.nzbfile_parser(full_nzb_path, self)
             except YEncEncryptionStructuralError:
-                self.purge_data()
+                if not reuse:
+                    self.purge_data()
                 raise
             except Exception as err:
                 self.incomplete = True
