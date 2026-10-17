@@ -29,7 +29,7 @@
     },
     {
       "id": "argon2id-03-complex-password",
-      "description": "Password with spaces and punctuation symbols",
+      "description": "Password with spaces and punctuation symbols (primitive-level KDF vector; salt not a valid wire salt)",
       "password": "P@ssw0rd with spaces & symbols!#$%",
       "salt_hex": "0102030405060708090a0b0c0d0e0f10",
       "expected_key_hex": "f3b358755d7036115673c2e1af1d5fc7052c8861e331bece7ec9908863e1407b"
@@ -50,7 +50,7 @@
     },
     {
       "id": "argon2id-06-long-password",
-      "description": "128-character long alphanumeric password",
+      "description": "128-character long alphanumeric password (primitive-level KDF vector; salt not a valid wire salt)",
       "password": "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2W3x4Y5z6A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2W3x4Y5z6A1b2C3d4E5f6G7h8I9j0K1l2M3n4",
       "salt_hex": "102030405060708090a0b0c0d0e0f000",
       "expected_key_hex": "1743d4b5614edb4e0aac20e9a74474fd3d2fe84f20cc4093369b9fe2a1546b7a"
@@ -69,7 +69,7 @@
     },
     {
       "id": "argon2id-08-cjk-utf8",
-      "description": "CJK password requiring 3-byte UTF-8 sequences",
+      "description": "CJK password requiring 3-byte UTF-8 sequences (primitive-level KDF vector; salt not a valid wire salt)",
       "password": "パスワード漢字",
       "salt_hex": "00112233445566778899aabbccddeeff",
       "expected_key_hex": "28f814895d69e13fd6000ba126b7e8d2cc0b31229d7f0540166b5eea572437dc"

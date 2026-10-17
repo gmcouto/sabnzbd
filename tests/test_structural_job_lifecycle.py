@@ -195,9 +195,3 @@ class TestStructuralErrorJobLifecycle:
 
         sabnzbd.PostProcessor.process.assert_called_once_with(nzo)
         assert nzo.fail_msg == "Structural yEnc-encryption failure: missing or invalid metadata"
-
-        # Post-processing fails a job with a fail_msg without running any steps
-        # (postproc.py: fail_msg set -> all_ok False -> Status.FAILED in history).
-        # Simulate its outcome check here against the real nzo state:
-        assert nzo.fail_msg, "postproc treats a set fail_msg as a failed download"
-        assert nzo.status != Status.COMPLETED

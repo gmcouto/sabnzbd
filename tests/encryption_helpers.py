@@ -1,4 +1,4 @@
-"""Encryption helpers for tests (FF1 encryption and test control-key derivation)."""
+"""Encryption helpers for tests (FF1 encryption oracle)."""
 
 import math
 
@@ -11,8 +11,6 @@ from sabnzbd.encryption import (
     numeral_to_byte,
     str_radix,
 )
-
-RADIX = 253
 
 
 def ff1_encrypt_numerals(key: bytes, tweak: bytes, numerals: list[int], radix: int = 253) -> list[int]:
@@ -65,7 +63,3 @@ def ff1_encrypt(key: bytes, tweak: bytes, plaintext_bytes: bytes, radix: int = 2
     numerals = [byte_to_numeral(b) for b in plaintext_bytes]
     ct_numerals = ff1_encrypt_numerals(key, tweak, numerals, radix)
     return bytes(numeral_to_byte(i) for i in ct_numerals)
-
-
-def encrypt_control_line(plaintext: bytes, enc_key: bytes, tweak: bytes, radix: int = 253) -> bytes:
-    return ff1_encrypt(enc_key, tweak, plaintext, radix)

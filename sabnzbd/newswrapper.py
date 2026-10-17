@@ -54,10 +54,12 @@ def _requires_body(article: "sabnzbd.nzb.Article") -> bool:
 def _captures_body(article: "sabnzbd.nzb.Article") -> bool:
     """Whether this article's raw BODY bytes must be journaled.
 
-    This is exactly the arming condition used before a BODY command goes out; every
-    journal bound added (arm) must be retired with the same predicate (release), so
-    plain or precheck articles on a shared connection never decrement another
-    in-flight encrypted article's bound.
+    This is the arming condition used before a BODY command goes out, so plain or
+    precheck articles on a shared connection never journal. Retiring a bound is
+    stateful, not predicate-only: _RawBodyCapture.release() retires only an
+    actually armed contribution, so discarding an article that never armed (or
+    whose response already released it) cannot clear a co-pipelined in-flight
+    article's journal.
     """
     return _requires_body(article) and not article.nzf.nzo.precheck
 
@@ -89,13 +91,19 @@ class _RawBodyCapture:
     command) never misaligns later responses (DL-R8-1).
     """
 
-    __slots__ = ("_chunks", "_retained", "_bound", "_dropped", "_processed", "_consumed", "_journal_start")
+    __slots__ = ("_chunks", "_retained", "_bound", "_dropped", "_processed", "_consumed", "_journal_start", "_armed")
 
     def __init__(self):
         self._chunks: list[bytes] = []
         self._retained = 0
         self._bound = 0
         self._dropped = False
+        # Bound contributed per article object that armed the journal. release()
+        # retires only an article's own contribution (one arm each call), so a
+        # never-armed or already-released article cannot subtract another
+        # in-flight article's bound. id()-keyed: Article is slotted without
+        # __weakref__ or __eq__, so object identity is the only stable key.
+        self._armed: dict[int, int] = {}
         # Connection-owned stream accounting, in normalized decoder bytes
         self._processed = 0  # total bytes handed to the decoder
         self._consumed = 0  # bytes attributed to completed responses (FIFO)
@@ -134,11 +142,31 @@ class _RawBodyCapture:
         """
         if not self.active:
             self._journal_start = self._processed
-        self._bound += self._article_bound(article)
+        bound = self._article_bound(article)
+        self._armed[id(article)] = self._armed.get(id(article), 0) + bound
+        self._bound += bound
 
     def release(self, article: "sabnzbd.nzb.Article") -> None:
-        """Retire one completed article's bound contribution; full release frees storage."""
-        self._bound = max(0, self._bound - self._article_bound(article))
+        """Retire one armed article's bound contribution; full release frees storage.
+
+        A no-op when the article holds no armed contribution: it never armed the
+        journal, or its response already released it. Without the per-article
+        record, such a discard subtracted a sibling's bound and, when the stolen
+        total reached zero, cleared a co-pipelined encrypted article's journal.
+        """
+        armed = self._armed.get(id(article))
+        if armed is None:
+            return
+        # One arm retires per release. Arming the same article twice (re-fetch
+        # before the first response retires) leaves the second contribution.
+        bound = self._article_bound(article)
+        if bound >= armed:
+            del self._armed[id(article)]
+            retired = armed
+        else:
+            self._armed[id(article)] = armed - bound
+            retired = bound
+        self._bound = max(0, self._bound - retired)
         if not self._bound:
             self._chunks.clear()
             self._retained = 0
@@ -154,6 +182,7 @@ class _RawBodyCapture:
         self._retained = 0
         self._bound = 0
         self._dropped = False
+        self._armed.clear()
         self._processed = 0
         self._consumed = 0
         self._journal_start = 0
@@ -566,8 +595,8 @@ class NewsWrapper:
 
             elif response.status_code == 500 and _requires_body(article) and not article.nzf.nzo.precheck:
                 # This server cannot serve BODY, and an encrypted article has no ARTICLE
-                # fallback. Pass the response to the decoder, which fails it closed as
-                # provider failover (YEncEncryptionCryptoError) and tries another server.
+                # fallback. The bodyless 500 is treated by Downloader.decode as a
+                # missing article (next-server search); decoder.decode never runs for it.
                 article_done = True
 
             elif response.status_code == 500:
@@ -634,7 +663,7 @@ class NewsWrapper:
         )
         if encrypted:
             # Bare LF is rewritten to CRLF below, which at most doubles a chunk. Reading at most
-            # half of the free buffer guarantees the rewritten chunk always fits.
+            # half of the decoder buffer guarantees the rewritten chunk always fits.
             half = max(1, len(memoryview(self.decoder)) // 2)
             nbytes = min(nbytes, half) if nbytes else half
 

@@ -41,6 +41,19 @@ def _write_nzb_gz(cache_dir: str, name: str, xml_content: str) -> str:
     return path
 
 
+def _make_nzb(meta_entries: list[tuple[str, str]]) -> str:
+    metas = "\n".join(f'  <meta type="{t}">{v}</meta>' for t, v in meta_entries)
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
+ <head>
+{metas}
+ </head>
+ <file poster="p@test.com" date="1600000000" subject="test.bin">
+  <segments><segment bytes="1000" number="1">s1@test</segment></segments>
+ </file>
+</nzb>"""
+
+
 @pytest.mark.usefixtures("clean_cache_dir")
 class TestNzbParser:
     @pytest.mark.config({"download_dir": SAB_CACHE_DIR})
@@ -161,20 +174,8 @@ class TestNzbParser:
         """Validate supplied version/cipher/mode during ingest before NNTP, independent of meta tag order."""
         from sabnzbd.encryption import YEncEncryptionStructuralError
 
-        def make_nzb(meta_entries: list[tuple[str, str]]) -> str:
-            metas = "\n".join(f'  <meta type="{t}">{v}</meta>' for t, v in meta_entries)
-            return f"""<?xml version="1.0" encoding="utf-8"?>
-<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
- <head>
-{metas}
- </head>
- <file poster="p@test.com" date="1600000000" subject="test.bin">
-  <segments><segment bytes="1000" number="1">s1@test</segment></segments>
- </file>
-</nzb>"""
-
         # 1. Supported version and cipher present, standard ordering
-        xml_ok = make_nzb(
+        xml_ok = _make_nzb(
             [
                 ("yenc_encrypted", "true"),
                 ("yenc_version", "1.2"),
@@ -188,7 +189,7 @@ class TestNzbParser:
         assert nzo_ok.meta["password"] == ["secret123"]
 
         # 2. Version and cipher absent -> succeeds (defaults apply)
-        xml_absent = make_nzb(
+        xml_absent = _make_nzb(
             [
                 ("password", "secret_absent"),
                 ("yenc_encrypted", "true"),
@@ -200,7 +201,7 @@ class TestNzbParser:
         assert nzo_absent.meta["password"] == ["secret_absent"]
 
         # 3. Independent of metadata ordering (reversed order)
-        xml_reversed = make_nzb(
+        xml_reversed = _make_nzb(
             [
                 ("password", "reversed_pw"),
                 ("yenc_cipher", "XChaCha20-Poly1305"),
@@ -215,7 +216,7 @@ class TestNzbParser:
         assert nzo_rev.meta["password"] == ["reversed_pw"]
 
         # 4. Unsupported version -> raises YEncEncryptionStructuralError
-        xml_bad_ver = make_nzb(
+        xml_bad_ver = _make_nzb(
             [
                 ("yenc_encrypted", "true"),
                 ("yenc_version", "2.0"),
@@ -226,7 +227,7 @@ class TestNzbParser:
             nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, "bad_ver", xml_bad_ver), NzbObject("bad_ver"))
 
         # 5. Unsupported cipher -> raises YEncEncryptionStructuralError
-        xml_bad_cipher = make_nzb(
+        xml_bad_cipher = _make_nzb(
             [
                 ("yenc_encrypted", "true"),
                 ("yenc_cipher", "AES-256-GCM"),
@@ -263,18 +264,6 @@ class TestNzbParser:
         """Body Std v1.2 §8: values are trimmed before matching; the stored password is not trimmed."""
         from sabnzbd.encryption import YEncEncryptionStructuralError
 
-        def make_nzb(meta_entries: list[tuple[str, str]]) -> str:
-            metas = "\n".join(f'  <meta type="{t}">{v}</meta>' for t, v in meta_entries)
-            return f"""<?xml version="1.0" encoding="utf-8"?>
-<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
- <head>
-{metas}
- </head>
- <file poster="p@test.com" date="1600000000" subject="test.bin">
-  <segments><segment bytes="1000" number="1">s1@test</segment></segments>
- </file>
-</nzb>"""
-
         accepted = [
             [("yenc_encrypted", "TRUE"), ("password", "pw1")],
             [("yenc_encrypted", " true "), ("password", "pw2")],
@@ -287,7 +276,7 @@ class TestNzbParser:
         ]
         for idx, entries in enumerate(accepted):
             nzo = NzbObject(f"accepted_{idx}")
-            nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, f"accepted_{idx}", make_nzb(entries)), nzo)
+            nzbparser.nzbfile_parser(_write_nzb_gz(SAB_CACHE_DIR, f"accepted_{idx}", _make_nzb(entries)), nzo)
             assert nzo.yenc_encrypted is True, idx
         assert nzo.meta["password"] == ["  padded pw  "]
 
@@ -298,13 +287,13 @@ class TestNzbParser:
         for idx, (entries, token) in enumerate(rejected):
             with pytest.raises(YEncEncryptionStructuralError, match=token):
                 nzbparser.nzbfile_parser(
-                    _write_nzb_gz(SAB_CACHE_DIR, f"rejected_{idx}", make_nzb(entries)), NzbObject(f"rejected_{idx}")
+                    _write_nzb_gz(SAB_CACHE_DIR, f"rejected_{idx}", _make_nzb(entries)), NzbObject(f"rejected_{idx}")
                 )
 
         # Any other yenc_encrypted value means a plain NZB (Body Std v1.2 §8)
         plain = NzbObject("plain_yes")
         nzbparser.nzbfile_parser(
-            _write_nzb_gz(SAB_CACHE_DIR, "plain_yes", make_nzb([("yenc_encrypted", "yes")])), plain
+            _write_nzb_gz(SAB_CACHE_DIR, "plain_yes", _make_nzb([("yenc_encrypted", "yes")])), plain
         )
         assert plain.yenc_encrypted is False
 
@@ -315,18 +304,6 @@ class TestNzbParser:
         Covers self-closing (<meta .../>) and explicit-empty (<meta ...></meta>) XML forms, plus a
         valid-nonempty-plus-empty duplicate of the same tag."""
         from sabnzbd.encryption import YEncEncryptionStructuralError
-
-        def make_nzb(meta_entries: list[tuple[str, str]]) -> str:
-            metas = "\n".join(f'  <meta type="{t}">{v}</meta>' for t, v in meta_entries)
-            return f"""<?xml version="1.0" encoding="utf-8"?>
-<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
- <head>
-{metas}
- </head>
- <file poster="p@test.com" date="1600000000" subject="test.bin">
-  <segments><segment bytes="1000" number="1">s1@test</segment></segments>
- </file>
-</nzb>"""
 
         # Both empty XML forms of both tags (self-closing and explicit empty), plus whitespace-only
         empty_declarations = [
@@ -362,7 +339,7 @@ class TestNzbParser:
             ),
         ]
         for entries, token, name in empty_declarations:
-            xml = make_nzb(entries)
+            xml = _make_nzb(entries)
             if name.endswith("_self_closing"):
                 tag = "yenc_version" if "ver" in name else "yenc_cipher"
                 xml = xml.replace(f'<meta type="{tag}"></meta>', f'<meta type="{tag}"/>')
@@ -372,7 +349,7 @@ class TestNzbParser:
         # Valid value plus an empty duplicate of the same tag: the empty entry must survive
         # collection and trip the existing validation gate
         for tag, token in (("yenc_version", "UNSUPPORTED_VERSION"), ("yenc_cipher", "UNSUPPORTED_CIPHER")):
-            xml = make_nzb(
+            xml = _make_nzb(
                 [
                     ("yenc_encrypted", "true"),
                     (tag, "1.2" if tag == "yenc_version" else "XChaCha20-Poly1305"),
@@ -390,7 +367,7 @@ class TestNzbParser:
             _write_nzb_gz(
                 SAB_CACHE_DIR,
                 "plain_empty_meta",
-                make_nzb([("yenc_version", ""), ("yenc_cipher", ""), ("category", "movies")]),
+                _make_nzb([("yenc_version", ""), ("yenc_cipher", ""), ("category", "movies")]),
             ),
             plain_nzo,
         )
@@ -403,7 +380,7 @@ class TestNzbParser:
             _write_nzb_gz(
                 SAB_CACHE_DIR,
                 "plain_arbitrary",
-                make_nzb([("arbitrary_field", ""), ("category", "movies")]),
+                _make_nzb([("arbitrary_field", ""), ("category", "movies")]),
             ),
             plain_arbitrary,
         )
@@ -415,18 +392,6 @@ class TestNzbParser:
         """Through the real process_single_nzb ingestion path: empty self-closing or explicit-empty
         version/cipher declarations are logged as ERROR, the job is not added to the queue, and no
         article scheduling or provider query happens."""
-
-        def make_nzb(meta_entries: list[tuple[str, str]]) -> str:
-            metas = "\n".join(f'  <meta type="{t}">{v}</meta>' for t, v in meta_entries)
-            return f"""<?xml version="1.0" encoding="utf-8"?>
-<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
- <head>
-{metas}
- </head>
- <file poster="p@test.com" date="1600000000" subject="test.bin">
-  <segments><segment bytes="1000" number="1">s1@test</segment></segments>
- </file>
-</nzb>"""
 
         monkeypatch.setattr(sabnzbd.cfg.admin_dir, "get_path", lambda: str(tmp_path / "admin"))
         monkeypatch.setattr(sabnzbd.cfg.download_dir, "get_path", lambda: str(tmp_path / "downloads"))
@@ -450,7 +415,7 @@ class TestNzbParser:
                 ("cipher_self_closing", '<meta type="yenc_cipher"/>', "UNSUPPORTED_CIPHER"),
             ]
             for name, self_closing_meta, match_token in cases:
-                xml = make_nzb([("yenc_encrypted", "true"), ("password", "pw")])
+                xml = _make_nzb([("yenc_encrypted", "true"), ("password", "pw")])
                 xml = xml.replace(
                     '  <meta type="password">pw</meta>',
                     f'  <meta type="password">pw</meta>\n  {self_closing_meta}',
@@ -470,7 +435,7 @@ class TestNzbParser:
                 assert queue.is_empty()
 
             # Explicit-empty form through real ingestion as well
-            xml = make_nzb([("yenc_encrypted", "true"), ("password", "pw"), ("yenc_cipher", "")])
+            xml = _make_nzb([("yenc_encrypted", "true"), ("password", "pw"), ("yenc_cipher", "")])
             nzb_path = _write_nzb_gz(SAB_CACHE_DIR, "ingest_cipher_explicit_empty", xml)
             caplog.set_level(logging.DEBUG)
             caplog.clear()
@@ -485,7 +450,7 @@ class TestNzbParser:
             assert queue.is_empty()
 
             # Valid-plus-empty duplicate through real ingestion
-            xml_dup = make_nzb(
+            xml_dup = _make_nzb(
                 [
                     ("yenc_encrypted", "true"),
                     ("password", "pw"),
@@ -507,7 +472,7 @@ class TestNzbParser:
             assert queue.is_empty()
 
             # Valid encrypted NZB with absent optional fields: ingests successfully
-            absent_xml = make_nzb([("yenc_encrypted", "true"), ("password", "pw")])
+            absent_xml = _make_nzb([("yenc_encrypted", "true"), ("password", "pw")])
             absent_path = _write_nzb_gz(SAB_CACHE_DIR, "ingest_absent", absent_xml)
             result, nzo_ids = nzbparser.process_single_nzb("absent.nzb.gz", path=absent_path, keep=True)
             assert result == AddNzbFileResult.OK
@@ -522,7 +487,7 @@ class TestNzbParser:
             ordinary_path = _write_nzb_gz(
                 SAB_CACHE_DIR,
                 "ingest_ordinary",
-                make_nzb([("yenc_version", ""), ("yenc_cipher", ""), ("category", "movies")]),
+                _make_nzb([("yenc_version", ""), ("yenc_cipher", ""), ("category", "movies")]),
             )
             result, nzo_ids = nzbparser.process_single_nzb("ordinary.nzb.gz", path=ordinary_path, keep=True)
             assert result == AddNzbFileResult.OK
@@ -554,19 +519,6 @@ class TestNzbParserMetadataValidationVectors:
     decryption requested, the same head blocks stay plain (Body Std v1.2 §8)."""
 
     @staticmethod
-    def _make_nzb(meta_entries: list[tuple[str, str]]) -> str:
-        metas = "\n".join(f'  <meta type="{t}">{v}</meta>' for t, v in meta_entries)
-        return f"""<?xml version="1.0" encoding="utf-8"?>
-<nzb xmlns="http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
- <head>
-{metas}
- </head>
- <file poster="p@test.com" date="1600000000" subject="test.bin">
-  <segments><segment bytes="1000" number="1">s1@test</segment></segments>
- </file>
-</nzb>"""
-
-    @staticmethod
     def _metadata_vector(vec_id: str) -> dict:
         vector_path = os.path.join(os.path.dirname(__file__), "data", "test-vectors", "malformed_inputs.json")
         import json
@@ -594,7 +546,7 @@ class TestNzbParserMetadataValidationVectors:
 
         nzo = NzbObject("metadata_01")
         nzbparser.nzbfile_parser(
-            _write_nzb_gz(SAB_CACHE_DIR, "metadata_01", self._make_nzb([("password", "archive_pw")])),
+            _write_nzb_gz(SAB_CACHE_DIR, "metadata_01", _make_nzb([("password", "archive_pw")])),
             nzo,
         )
         assert nzo.yenc_encrypted is False
@@ -608,7 +560,7 @@ class TestNzbParserMetadataValidationVectors:
             _write_nzb_gz(
                 SAB_CACHE_DIR,
                 "metadata_01_control",
-                self._make_nzb([("yenc_encrypted", "true"), ("password", "archive_pw")]),
+                _make_nzb([("yenc_encrypted", "true"), ("password", "archive_pw")]),
             ),
             encrypted,
         )
@@ -628,7 +580,7 @@ class TestNzbParserMetadataValidationVectors:
             _write_nzb_gz(
                 SAB_CACHE_DIR,
                 "metadata_02",
-                self._make_nzb([("yenc_encrypted", "false"), ("password", "archive_pw")]),
+                _make_nzb([("yenc_encrypted", "false"), ("password", "archive_pw")]),
             ),
             nzo,
         )
@@ -651,7 +603,7 @@ class TestNzbParserMetadataValidationVectors:
                 _write_nzb_gz(
                     SAB_CACHE_DIR,
                     "metadata_03",
-                    self._make_nzb([("yenc_encrypted", "true")]),
+                    _make_nzb([("yenc_encrypted", "true")]),
                 ),
                 nzo,
             )
@@ -681,7 +633,7 @@ class TestNzbParserMetadataValidationVectors:
             nzb_path = _write_nzb_gz(
                 SAB_CACHE_DIR,
                 "metadata_03_ingest",
-                self._make_nzb([("yenc_encrypted", "true")]),
+                _make_nzb([("yenc_encrypted", "true")]),
             )
             caplog.set_level(logging.DEBUG)
             caplog.clear()
