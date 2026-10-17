@@ -3,7 +3,7 @@
   "standard": "yEnc Control Lines Encryption Standard v1.2",
   "cipher": "FF1",
   "radix": 253,
-  "note": "Control-line layer only: the multi-line vectors are FF1 line-restoration fixtures. Their data lines are opaque filler, their =yencryption tags are not authenticated, and no consumer can authenticate these articles end to end; body-level vectors live in body_encryption.json.",
+  "note": "Control-line layer only: the single-line and multi-line vectors (including control-vec-04 and control-vec-05) are FF1-primitive fixtures. Their data lines are opaque filler, their =yencryption tags are not authenticated, and single-line fixture contents (such as control-vec-04's mismatched =yencryption salt or control-vec-05's CRC-less =yend) do not by themselves satisfy combined-mode article rules, so no consumer can authenticate these articles end to end; body-level vectors live in body_encryption.json.",
   "vectors": [
     {
       "id": "control-vec-01-line-1-ybegin-single",
@@ -58,7 +58,7 @@
     },
     {
       "id": "control-vec-04-line-3-yencryption",
-      "description": "Header line 3 =yencryption (exact length preservation)",
+      "description": "FF1-primitive fixture (control-line layer only; not a combined-mode-valid article: its =yencryption salt does not match the fixture Line 1 bootstrap salt, so dual-bootstrap agreement fails): Header line 3 =yencryption (exact length preservation)",
       "password": "test123",
       "salt_hex": "4b376d5839704c32715238764e34775a",
       "segment_index": 1,
@@ -73,7 +73,7 @@
     },
     {
       "id": "control-vec-05-line-4-yend-single",
-      "description": "Footer line 4 =yend minimal (exact length preservation)",
+      "description": "FF1-primitive fixture (control-line layer only; not a combined-mode-valid article: its =yend carries no applicable ciphertext CRC): Footer line 4 =yend minimal (exact length preservation)",
       "password": "test123",
       "salt_hex": "4b376d5839704c32715238764e34775a",
       "segment_index": 1,

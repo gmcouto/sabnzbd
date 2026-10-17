@@ -1242,91 +1242,18 @@ class TestDirectWriteGatingAndFailover:
         srv2.start()
 
         try:
-            s1 = Server(
-                server_id="srv1",
-                displayname="Primary Bad Server",
-                host=srv1.host,
-                port=srv1.port,
-                timeout=5,
-                threads=0,
-                priority=0,
-                use_ssl=False,
-                ssl_verify=0,
-                ssl_ciphers="",
-                pipelining_requests=mock.Mock(return_value=1),
-            )
-            s1.addrinfo = AddrInfo(*socket.getaddrinfo(srv1.host, srv1.port, socket.AF_INET, socket.SOCK_STREAM)[0])
-            s1.active = True
+            s1 = _make_server(srv1, "srv1", "Primary Bad Server", priority=0, pipelining=1)
 
-            s2 = Server(
-                server_id="srv2",
-                displayname="Backup Good Server",
-                host=srv2.host,
-                port=srv2.port,
-                timeout=5,
-                threads=0,
-                priority=1,
-                use_ssl=False,
-                ssl_verify=0,
-                ssl_ciphers="",
-                pipelining_requests=mock.Mock(return_value=1),
-            )
-            s2.addrinfo = AddrInfo(*socket.getaddrinfo(srv2.host, srv2.port, socket.AF_INET, socket.SOCK_STREAM)[0])
-            s2.active = True
+            s2 = _make_server(srv2, "srv2", "Backup Good Server", priority=1, pipelining=1)
 
-            mock_downloader = mock.MagicMock(spec=Downloader)
-            mock_downloader.servers = [s1, s2]
-            mock_downloader.reset_nw = lambda nw, *args, **kwargs: None
-            mock_downloader.finish_connect_nw = lambda nw, resp: Downloader.finish_connect_nw(mock_downloader, nw, resp)
-            mock_downloader.decode = lambda article, resp: Downloader.decode(article, resp)
-            mock_downloader.modify_socket = lambda nw, event: None
-            mock_downloader.remove_socket = lambda nw: None
-            mock_downloader.no_active_jobs = lambda: False
-            mock_downloader.shutdown = False
-            mock_downloader.paused_for_postproc = False
-            mock_downloader.force_disconnect = False
+            mock_downloader = _mock_downloader([s1, s2])
 
-            mock_bps = mock.MagicMock()
-            mock_cache = mock.MagicMock()
-            mock_queue = mock.MagicMock()
+            mock_bps, mock_cache, mock_queue = _mock_services()
+            art, mock_nzo = _enc_article("art@e2e", password)
 
-            mock_nzo = mock.MagicMock()
-            mock_nzo.password = password
-            mock_nzo.yenc_encrypted = True
-            mock_nzo.precheck = False
-            mock_nzo.removed_from_queue = False
-            mock_nzo.status = "active"
-            mock_nzo.priority = 0
-            mock_nzo.update_download_stats = mock.MagicMock()
-
-            mock_nzf = mock.MagicMock()
-            mock_nzf.nzo = mock_nzo
-            mock_nzf.filename_checked = True
-            mock_nzf.type = "yenc"
-
-            art = Article("art@e2e", 100, mock_nzf)
-            art.lowest_partnum = False
-            art.on_disk = False
-            art.tries = 0
-
-            with (
-                mock.patch.object(sabnzbd, "Downloader", mock_downloader, create=True),
-                mock.patch.object(sabnzbd, "BPSMeter", mock_bps, create=True),
-                mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
-                mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
-            ):
+            with _patched_services(mock_downloader, mock_bps, mock_cache, mock_queue):
                 # 1. Connect NW1 to Server 1 (tampered article)
-                nw1 = NewsWrapper(s1, thrdnum=1)
-                s1.idle_threads.add(nw1)
-                nw1.init_connect()
-                for _ in range(50):
-                    if nw1.connected:
-                        break
-                    time.sleep(0.05)
-                nw1.nntp.sock.setblocking(True)
-                nw1.nntp.sock.settimeout(2)
-                nw1.read()
-                assert nw1.ready
+                nw1 = _connect_wrapper(s1)
 
                 # Request article from Server 1
                 art.fetcher = s1
@@ -1341,17 +1268,7 @@ class TestDirectWriteGatingAndFailover:
                 assert not mock_nzo.increase_bad_articles_counter.called
 
                 # 2. Connect NW2 to Server 2 (valid article)
-                nw2 = NewsWrapper(s2, thrdnum=1)
-                s2.idle_threads.add(nw2)
-                nw2.init_connect()
-                for _ in range(50):
-                    if nw2.connected:
-                        break
-                    time.sleep(0.05)
-                nw2.nntp.sock.setblocking(True)
-                nw2.nntp.sock.settimeout(2)
-                nw2.read()
-                assert nw2.ready
+                nw2 = _connect_wrapper(s2)
 
                 # Request article from Server 2
                 art.fetcher = s2
@@ -1394,74 +1311,15 @@ class TestDirectWriteGatingAndFailover:
         srv.start()
 
         try:
-            s1 = Server(
-                server_id="srv_a",
-                displayname="Article Fallback Server",
-                host=srv.host,
-                port=srv.port,
-                timeout=5,
-                threads=0,
-                priority=0,
-                use_ssl=False,
-                ssl_verify=0,
-                ssl_ciphers="",
-                pipelining_requests=mock.Mock(return_value=1),
-            )
-            s1.addrinfo = AddrInfo(*socket.getaddrinfo(srv.host, srv.port, socket.AF_INET, socket.SOCK_STREAM)[0])
-            s1.active = True
+            s1 = _make_server(srv, "srv_a", "Article Fallback Server", priority=0, pipelining=1)
 
-            mock_downloader = mock.MagicMock(spec=Downloader)
-            mock_downloader.servers = [s1]
-            mock_downloader.reset_nw = lambda nw, *args, **kwargs: None
-            mock_downloader.finish_connect_nw = lambda nw, resp: Downloader.finish_connect_nw(mock_downloader, nw, resp)
-            mock_downloader.decode = lambda article, resp: Downloader.decode(article, resp)
-            mock_downloader.modify_socket = lambda nw, event: None
-            mock_downloader.remove_socket = lambda nw: None
-            mock_downloader.no_active_jobs = lambda: False
-            mock_downloader.shutdown = False
-            mock_downloader.paused_for_postproc = False
-            mock_downloader.force_disconnect = False
+            mock_downloader = _mock_downloader([s1])
 
-            mock_bps = mock.MagicMock()
-            mock_cache = mock.MagicMock()
-            mock_queue = mock.MagicMock()
+            mock_bps, mock_cache, mock_queue = _mock_services()
+            art, _mock_nzo = _enc_article("art@e2e", password)
 
-            mock_nzo = mock.MagicMock()
-            mock_nzo.password = password
-            mock_nzo.yenc_encrypted = True
-            mock_nzo.precheck = False
-            mock_nzo.removed_from_queue = False
-            mock_nzo.status = "active"
-            mock_nzo.priority = 0
-            mock_nzo.update_download_stats = mock.MagicMock()
-
-            mock_nzf = mock.MagicMock()
-            mock_nzf.nzo = mock_nzo
-            mock_nzf.filename_checked = True
-            mock_nzf.type = "yenc"
-
-            art = Article("art@e2e", 100, mock_nzf)
-            art.lowest_partnum = False
-            art.on_disk = False
-            art.tries = 0
-
-            with (
-                mock.patch.object(sabnzbd, "Downloader", mock_downloader, create=True),
-                mock.patch.object(sabnzbd, "BPSMeter", mock_bps, create=True),
-                mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
-                mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
-            ):
-                nw1 = NewsWrapper(s1, thrdnum=1)
-                s1.idle_threads.add(nw1)
-                nw1.init_connect()
-                for _ in range(50):
-                    if nw1.connected:
-                        break
-                    time.sleep(0.05)
-                nw1.nntp.sock.setblocking(True)
-                nw1.nntp.sock.settimeout(2)
-                nw1.read()
-                assert nw1.ready
+            with _patched_services(mock_downloader, mock_bps, mock_cache, mock_queue):
+                nw1 = _connect_wrapper(s1)
 
                 # BODY -> 500: the article fails over (never cached), and no ARTICLE is sent
                 art.fetcher = s1
@@ -1581,74 +1439,15 @@ class TestDirectWriteGatingAndFailover:
         srv.start()
 
         try:
-            s1 = Server(
-                server_id="srv_lf",
-                displayname="Bare LF Server",
-                host=srv.host,
-                port=srv.port,
-                timeout=5,
-                threads=0,
-                priority=0,
-                use_ssl=False,
-                ssl_verify=0,
-                ssl_ciphers="",
-                pipelining_requests=mock.Mock(return_value=1),
-            )
-            s1.addrinfo = AddrInfo(*socket.getaddrinfo(srv.host, srv.port, socket.AF_INET, socket.SOCK_STREAM)[0])
-            s1.active = True
+            s1 = _make_server(srv, "srv_lf", "Bare LF Server", priority=0, pipelining=1)
 
-            mock_downloader = mock.MagicMock(spec=Downloader)
-            mock_downloader.servers = [s1]
-            mock_downloader.reset_nw = lambda nw, *args, **kwargs: None
-            mock_downloader.finish_connect_nw = lambda nw, resp: Downloader.finish_connect_nw(mock_downloader, nw, resp)
-            mock_downloader.decode = lambda article, resp: Downloader.decode(article, resp)
-            mock_downloader.modify_socket = lambda nw, event: None
-            mock_downloader.remove_socket = lambda nw: None
-            mock_downloader.no_active_jobs = lambda: False
-            mock_downloader.shutdown = False
-            mock_downloader.paused_for_postproc = False
-            mock_downloader.force_disconnect = False
+            mock_downloader = _mock_downloader([s1])
 
-            mock_bps = mock.MagicMock()
-            mock_cache = mock.MagicMock()
-            mock_queue = mock.MagicMock()
+            mock_bps, mock_cache, mock_queue = _mock_services()
+            art, _mock_nzo = _enc_article("art@e2e", password)
 
-            mock_nzo = mock.MagicMock()
-            mock_nzo.password = password
-            mock_nzo.yenc_encrypted = True
-            mock_nzo.precheck = False
-            mock_nzo.removed_from_queue = False
-            mock_nzo.status = "active"
-            mock_nzo.priority = 0
-            mock_nzo.update_download_stats = mock.MagicMock()
-
-            mock_nzf = mock.MagicMock()
-            mock_nzf.nzo = mock_nzo
-            mock_nzf.filename_checked = True
-            mock_nzf.type = "yenc"
-
-            art = Article("art@e2e", 100, mock_nzf)
-            art.lowest_partnum = False
-            art.on_disk = False
-            art.tries = 0
-
-            with (
-                mock.patch.object(sabnzbd, "Downloader", mock_downloader, create=True),
-                mock.patch.object(sabnzbd, "BPSMeter", mock_bps, create=True),
-                mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
-                mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
-            ):
-                nw1 = NewsWrapper(s1, thrdnum=1)
-                s1.idle_threads.add(nw1)
-                nw1.init_connect()
-                for _ in range(50):
-                    if nw1.connected:
-                        break
-                    time.sleep(0.05)
-                nw1.nntp.sock.setblocking(True)
-                nw1.nntp.sock.settimeout(2)
-                nw1.read()
-                assert nw1.ready
+            with _patched_services(mock_downloader, mock_bps, mock_cache, mock_queue):
+                nw1 = _connect_wrapper(s1)
 
                 art.fetcher = s1
                 nw1.queue_article(art)
@@ -1664,47 +1463,49 @@ class TestDirectWriteGatingAndFailover:
             srv.stop()
 
 
-def _transport_server_and_article(enc_body: bytes, password: str, split_at=None):
-    """Real NewsWrapper + real sabctools Decoder against a mock NNTP server.
-
-    Returns (server, server_config, article, mocks) wired exactly like the framing
-    tests above: blocking sockets, mocked Downloader services.
-    """
-    srv = MockArticleNNTPServer(enc_body, split_at=split_at)
-    srv.start()
-
-    s1 = Server(
-        server_id="srv_raw",
-        displayname="Raw Capture Server",
+def _make_server(srv, server_id, displayname, priority=0, pipelining=1):
+    """Real Server config bound to a running mock NNTP server."""
+    server = Server(
+        server_id=server_id,
+        displayname=displayname,
         host=srv.host,
         port=srv.port,
         timeout=5,
         threads=0,
-        priority=0,
+        priority=priority,
         use_ssl=False,
         ssl_verify=0,
         ssl_ciphers="",
-        pipelining_requests=mock.Mock(return_value=2),
+        pipelining_requests=mock.Mock(return_value=pipelining),
     )
-    s1.addrinfo = AddrInfo(*socket.getaddrinfo(srv.host, srv.port, socket.AF_INET, socket.SOCK_STREAM)[0])
-    s1.active = True
+    server.addrinfo = AddrInfo(*socket.getaddrinfo(srv.host, srv.port, socket.AF_INET, socket.SOCK_STREAM)[0])
+    server.active = True
+    return server
 
-    mock_downloader = mock.MagicMock(spec=Downloader)
-    mock_downloader.servers = [s1]
-    mock_downloader.reset_nw = lambda nw, *args, **kwargs: None
-    mock_downloader.finish_connect_nw = lambda nw, resp: Downloader.finish_connect_nw(mock_downloader, nw, resp)
-    mock_downloader.decode = lambda article, resp: Downloader.decode(article, resp)
-    mock_downloader.modify_socket = lambda nw, event: None
-    mock_downloader.remove_socket = lambda nw: None
-    mock_downloader.no_active_jobs = lambda: False
-    mock_downloader.shutdown = False
-    mock_downloader.paused_for_postproc = False
-    mock_downloader.force_disconnect = False
 
-    mock_bps = mock.MagicMock()
-    mock_cache = mock.MagicMock()
-    mock_queue = mock.MagicMock()
+def _mock_downloader(servers):
+    """Mock Downloader whose finish_connect/decode delegate to the real class."""
+    downloader = mock.MagicMock(spec=Downloader)
+    downloader.servers = list(servers)
+    downloader.reset_nw = lambda nw, *args, **kwargs: None
+    downloader.finish_connect_nw = lambda nw, resp: Downloader.finish_connect_nw(downloader, nw, resp)
+    downloader.decode = lambda article, resp: Downloader.decode(article, resp)
+    downloader.modify_socket = lambda nw, event: None
+    downloader.remove_socket = lambda nw: None
+    downloader.no_active_jobs = lambda: False
+    downloader.shutdown = False
+    downloader.paused_for_postproc = False
+    downloader.force_disconnect = False
+    return downloader
 
+
+def _mock_services():
+    """The (bps, cache, queue) service mocks patched over sabnzbd globals."""
+    return mock.MagicMock(), mock.MagicMock(), mock.MagicMock()
+
+
+def _enc_article(msgid, password):
+    """Real Article on a mocked encrypted NZO/NZF; returns (article, mock_nzo)."""
     mock_nzo = mock.MagicMock()
     mock_nzo.password = password
     mock_nzo.yenc_encrypted = True
@@ -1713,17 +1514,72 @@ def _transport_server_and_article(enc_body: bytes, password: str, split_at=None)
     mock_nzo.status = "active"
     mock_nzo.priority = 0
     mock_nzo.update_download_stats = mock.MagicMock()
-
     mock_nzf = mock.MagicMock()
     mock_nzf.nzo = mock_nzo
     mock_nzf.filename_checked = True
     mock_nzf.type = "yenc"
-
-    art = Article("art@e2e", 100, mock_nzf)
+    art = Article(msgid, 100, mock_nzf)
     art.lowest_partnum = False
     art.on_disk = False
     art.tries = 0
+    return art, mock_nzo
 
+
+def _make_article(msgid, password, encrypted):
+    """Real Article on a mocked NZO/NZF for mixed plain/encrypted pipelining."""
+    art, nzo = _enc_article(msgid, password if encrypted else None)
+    nzo.yenc_encrypted = encrypted
+    return art
+
+
+def _connect_wrapper_no_read(server):
+    """NewsWrapper connected (blocking socket); welcome not yet read."""
+    nw = NewsWrapper(server, thrdnum=1)
+    server.idle_threads.add(nw)
+    nw.init_connect()
+    for _ in range(50):
+        if nw.connected:
+            break
+        time.sleep(0.05)
+    return nw
+
+
+def _connect_wrapper(server):
+    """NewsWrapper connected (blocking socket) to server, welcome ready."""
+    nw = _connect_wrapper_no_read(server)
+    nw.nntp.sock.setblocking(True)
+    nw.nntp.sock.settimeout(2)
+    nw.read()
+    assert nw.ready
+    return nw
+
+
+def _patched_services(downloader, bps, cache, queue, write_monitor=None):
+    """ExitStack patching Downloader/BPSMeter/ArticleCache/NzbQueue (+ WriteMonitor if given)."""
+    import contextlib
+
+    stack = contextlib.ExitStack()
+    stack.enter_context(mock.patch.object(sabnzbd, "Downloader", downloader, create=True))
+    stack.enter_context(mock.patch.object(sabnzbd, "BPSMeter", bps, create=True))
+    stack.enter_context(mock.patch.object(sabnzbd, "ArticleCache", cache, create=True))
+    stack.enter_context(mock.patch.object(sabnzbd, "NzbQueue", queue, create=True))
+    if write_monitor is not None:
+        stack.enter_context(mock.patch.object(sabnzbd, "WriteMonitor", write_monitor, create=True))
+    return stack
+
+
+def _transport_server_and_article(enc_body: bytes, password: str, split_at=None):
+    """Real NewsWrapper + real sabctools Decoder against a mock NNTP server.
+
+    Returns (server, server_config, article, mocks) wired exactly like the framing
+    tests above: blocking sockets, mocked Downloader services.
+    """
+    srv = MockArticleNNTPServer(enc_body, split_at=split_at)
+    srv.start()
+    s1 = _make_server(srv, "srv_raw", "Raw Capture Server", pipelining=2)
+    mock_downloader = _mock_downloader([s1])
+    mock_bps, mock_cache, mock_queue = _mock_services()
+    art, _nzo = _enc_article("art@e2e", password)
     return srv, s1, art, mock_downloader, mock_bps, mock_cache, mock_queue
 
 
@@ -1864,19 +1720,8 @@ class TestRawTransportCapture:
         )
 
         try:
-            with (
-                mock.patch.object(sabnzbd, "Downloader", mock_downloader, create=True),
-                mock.patch.object(sabnzbd, "BPSMeter", mock_bps, create=True),
-                mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
-                mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
-            ):
-                nw1 = NewsWrapper(s1, thrdnum=1)
-                s1.idle_threads.add(nw1)
-                nw1.init_connect()
-                for _ in range(50):
-                    if nw1.connected:
-                        break
-                    time.sleep(0.05)
+            with _patched_services(mock_downloader, mock_bps, mock_cache, mock_queue):
+                nw1 = _connect_wrapper_no_read(s1)
                 _connect_and_fetch(nw1, s1, art)
                 if split_at:
                     nw1.read()
@@ -1897,19 +1742,8 @@ class TestRawTransportCapture:
         )
 
         try:
-            with (
-                mock.patch.object(sabnzbd, "Downloader", mock_downloader, create=True),
-                mock.patch.object(sabnzbd, "BPSMeter", mock_bps, create=True),
-                mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
-                mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
-            ):
-                nw1 = NewsWrapper(s1, thrdnum=1)
-                s1.idle_threads.add(nw1)
-                nw1.init_connect()
-                for _ in range(50):
-                    if nw1.connected:
-                        break
-                    time.sleep(0.05)
+            with _patched_services(mock_downloader, mock_bps, mock_cache, mock_queue):
+                nw1 = _connect_wrapper_no_read(s1)
                 _connect_and_fetch(nw1, s1, art)
 
                 mock_cache.save_article.assert_called_once()
@@ -1926,80 +1760,21 @@ class TestRawTransportCapture:
         enc_body, *_ = _encrypted_wire(password=password, plaintext=plaintext)
         srv = _PipelinedNNTPServer(enc_body)
         srv.start()
-        s1 = Server(
-            server_id="srv_pipe",
-            displayname="Pipelined Server",
-            host=srv.host,
-            port=srv.port,
-            timeout=5,
-            threads=0,
-            priority=0,
-            use_ssl=False,
-            ssl_verify=0,
-            ssl_ciphers="",
-            pipelining_requests=mock.Mock(return_value=2),
-        )
-        s1.addrinfo = AddrInfo(*socket.getaddrinfo(srv.host, srv.port, socket.AF_INET, socket.SOCK_STREAM)[0])
-        s1.active = True
+        s1 = _make_server(srv, "srv_pipe", "Pipelined Server", priority=0, pipelining=2)
 
-        mock_downloader = mock.MagicMock(spec=Downloader)
-        mock_downloader.servers = [s1]
-        mock_downloader.reset_nw = lambda nw, *args, **kwargs: None
-        mock_downloader.finish_connect_nw = lambda nw, resp: Downloader.finish_connect_nw(mock_downloader, nw, resp)
-        mock_downloader.decode = lambda article, resp: Downloader.decode(article, resp)
-        mock_downloader.modify_socket = lambda nw, event: None
-        mock_downloader.remove_socket = lambda nw: None
-        mock_downloader.no_active_jobs = lambda: False
-        mock_downloader.shutdown = False
-        mock_downloader.paused_for_postproc = False
-        mock_downloader.force_disconnect = False
+        mock_downloader = _mock_downloader([s1])
 
-        mock_bps = mock.MagicMock()
-        mock_cache = mock.MagicMock()
-        mock_queue = mock.MagicMock()
-
-        mock_nzo = mock.MagicMock()
-        mock_nzo.password = password
-        mock_nzo.yenc_encrypted = True
-        mock_nzo.precheck = False
-        mock_nzo.removed_from_queue = False
-        mock_nzo.status = "active"
-        mock_nzo.priority = 0
-        mock_nzo.update_download_stats = mock.MagicMock()
-
-        mock_nzf = mock.MagicMock()
-        mock_nzf.nzo = mock_nzo
-        mock_nzf.filename_checked = True
-        mock_nzf.type = "yenc"
-
-        art1 = Article("art1@e2e", 100, mock_nzf)
-        art1.lowest_partnum = False
-        art1.on_disk = False
-        art1.tries = 0
-        art2 = Article("art2@e2e", 100, mock_nzf)
+        mock_bps, mock_cache, mock_queue = _mock_services()
+        art1, _mock_nzo = _enc_article("art1@e2e", password)
+        art2 = Article("art2@e2e", 100, art1.nzf)
         art2.lowest_partnum = False
         art2.on_disk = False
         art2.tries = 0
         arts = [art1, art2]
 
         try:
-            with (
-                mock.patch.object(sabnzbd, "Downloader", mock_downloader, create=True),
-                mock.patch.object(sabnzbd, "BPSMeter", mock_bps, create=True),
-                mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
-                mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
-            ):
-                nw1 = NewsWrapper(s1, thrdnum=1)
-                s1.idle_threads.add(nw1)
-                nw1.init_connect()
-                for _ in range(50):
-                    if nw1.connected:
-                        break
-                    time.sleep(0.05)
-                nw1.nntp.sock.setblocking(True)
-                nw1.nntp.sock.settimeout(2)
-                nw1.read()
-                assert nw1.ready
+            with _patched_services(mock_downloader, mock_bps, mock_cache, mock_queue):
+                nw1 = _connect_wrapper(s1)
 
                 # Pipeline two requests: the second command goes out once the first
                 # response is read (concurrency semaphore), then both decode.
@@ -2064,81 +1839,26 @@ class TestRawTransportCapture:
             plain_bytes_early=partial_read,
         )
         srv.start()
-        s1 = Server(
-            server_id="srv_mixed",
-            displayname="Mixed Server",
-            host=srv.host,
-            port=srv.port,
-            timeout=5,
-            threads=0,
-            priority=0,
-            use_ssl=False,
-            ssl_verify=0,
-            ssl_ciphers="",
-            pipelining_requests=mock.Mock(return_value=2),
-        )
-        s1.addrinfo = AddrInfo(*socket.getaddrinfo(srv.host, srv.port, socket.AF_INET, socket.SOCK_STREAM)[0])
-        s1.active = True
+        s1 = _make_server(srv, "srv_mixed", "Mixed Server", priority=0, pipelining=2)
 
-        mock_downloader = mock.MagicMock(spec=Downloader)
-        mock_downloader.servers = [s1]
-        mock_downloader.reset_nw = lambda nw, *args, **kwargs: None
-        mock_downloader.finish_connect_nw = lambda nw, resp: Downloader.finish_connect_nw(mock_downloader, nw, resp)
-        mock_downloader.decode = lambda article, resp: Downloader.decode(article, resp)
-        mock_downloader.modify_socket = lambda nw, event: None
-        mock_downloader.remove_socket = lambda nw: None
-        mock_downloader.no_active_jobs = lambda: False
-        mock_downloader.shutdown = False
-        mock_downloader.paused_for_postproc = False
-        mock_downloader.force_disconnect = False
+        mock_downloader = _mock_downloader([s1])
 
-        mock_bps = mock.MagicMock()
-        mock_cache = mock.MagicMock()
-        mock_queue = mock.MagicMock()
+        mock_bps, mock_cache, mock_queue = _mock_services()
 
-        def _make_article(msgid, encrypted):
-            nzo = mock.MagicMock()
-            nzo.password = password if encrypted else None
-            nzo.yenc_encrypted = encrypted
-            nzo.precheck = False
-            nzo.removed_from_queue = False
-            nzo.status = "active"
-            nzo.priority = 0
-            nzo.update_download_stats = mock.MagicMock()
-            nzf = mock.MagicMock()
-            nzf.nzo = nzo
-            nzf.filename_checked = True
-            nzf.type = "yenc"
-            art = Article(msgid, 100, nzf)
-            art.lowest_partnum = False
-            art.on_disk = False
-            art.tries = 0
-            return art
-
-        plain_art = _make_article("plain@e2e", False)
-        enc_art = _make_article("enc@e2e", True)
+        plain_art = _make_article("plain@e2e", password, False)
+        enc_art = _make_article("enc@e2e", password, True)
         plain_art.bytes = len(plain_data)
         enc_art.bytes = len(plaintext)
 
         try:
-            with (
-                mock.patch.object(sabnzbd, "Downloader", mock_downloader, create=True),
-                mock.patch.object(sabnzbd, "BPSMeter", mock_bps, create=True),
-                mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
-                mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
-                mock.patch.object(sabnzbd, "WriteMonitor", mock.MagicMock(allow_direct_decode=False), create=True),
+            with _patched_services(
+                mock_downloader,
+                mock_bps,
+                mock_cache,
+                mock_queue,
+                write_monitor=mock.MagicMock(allow_direct_decode=False),
             ):
-                nw1 = NewsWrapper(s1, thrdnum=1)
-                s1.idle_threads.add(nw1)
-                nw1.init_connect()
-                for _ in range(50):
-                    if nw1.connected:
-                        break
-                    time.sleep(0.05)
-                nw1.nntp.sock.setblocking(True)
-                nw1.nntp.sock.settimeout(2)
-                nw1.read()
-                assert nw1.ready
+                nw1 = _connect_wrapper(s1)
 
                 # Pipeline the large plain article first, then the encrypted one; both
                 # responses arrive in one read while the journal is armed for the
@@ -2188,83 +1908,28 @@ class TestRawTransportCapture:
             }
         )
         srv.start()
-        s1 = Server(
-            server_id="srv_rearm",
-            displayname="Rearm Server",
-            host=srv.host,
-            port=srv.port,
-            timeout=5,
-            threads=0,
-            priority=0,
-            use_ssl=False,
-            ssl_verify=0,
-            ssl_ciphers="",
-            pipelining_requests=mock.Mock(return_value=2),
-        )
-        s1.addrinfo = AddrInfo(*socket.getaddrinfo(srv.host, srv.port, socket.AF_INET, socket.SOCK_STREAM)[0])
-        s1.active = True
+        s1 = _make_server(srv, "srv_rearm", "Rearm Server", priority=0, pipelining=2)
 
-        mock_downloader = mock.MagicMock(spec=Downloader)
-        mock_downloader.servers = [s1]
-        mock_downloader.reset_nw = lambda nw, *args, **kwargs: None
-        mock_downloader.finish_connect_nw = lambda nw, resp: Downloader.finish_connect_nw(mock_downloader, nw, resp)
-        mock_downloader.decode = lambda article, resp: Downloader.decode(article, resp)
-        mock_downloader.modify_socket = lambda nw, event: None
-        mock_downloader.remove_socket = lambda nw: None
-        mock_downloader.no_active_jobs = lambda: False
-        mock_downloader.shutdown = False
-        mock_downloader.paused_for_postproc = False
-        mock_downloader.force_disconnect = False
+        mock_downloader = _mock_downloader([s1])
 
-        mock_bps = mock.MagicMock()
-        mock_cache = mock.MagicMock()
-        mock_queue = mock.MagicMock()
+        mock_bps, mock_cache, mock_queue = _mock_services()
 
-        def _make_article(msgid, encrypted):
-            nzo = mock.MagicMock()
-            nzo.password = password if encrypted else None
-            nzo.yenc_encrypted = encrypted
-            nzo.precheck = False
-            nzo.removed_from_queue = False
-            nzo.status = "active"
-            nzo.priority = 0
-            nzo.update_download_stats = mock.MagicMock()
-            nzf = mock.MagicMock()
-            nzf.nzo = nzo
-            nzf.filename_checked = True
-            nzf.type = "yenc"
-            art = Article(msgid, 100, nzf)
-            art.lowest_partnum = False
-            art.on_disk = False
-            art.tries = 0
-            return art
-
-        plain_art = _make_article("plain@e2e", False)
-        plain2_art = _make_article("plain2@e2e", False)
-        enc_art = _make_article("enc@e2e", True)
+        plain_art = _make_article("plain@e2e", password, False)
+        plain2_art = _make_article("plain2@e2e", password, False)
+        enc_art = _make_article("enc@e2e", password, True)
         plain_art.bytes = len(plain_data)
         plain2_art.bytes = len(plain_data)
         enc_art.bytes = len(plaintext)
 
         try:
-            with (
-                mock.patch.object(sabnzbd, "Downloader", mock_downloader, create=True),
-                mock.patch.object(sabnzbd, "BPSMeter", mock_bps, create=True),
-                mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
-                mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
-                mock.patch.object(sabnzbd, "WriteMonitor", mock.MagicMock(allow_direct_decode=False), create=True),
+            with _patched_services(
+                mock_downloader,
+                mock_bps,
+                mock_cache,
+                mock_queue,
+                write_monitor=mock.MagicMock(allow_direct_decode=False),
             ):
-                nw1 = NewsWrapper(s1, thrdnum=1)
-                s1.idle_threads.add(nw1)
-                nw1.init_connect()
-                for _ in range(50):
-                    if nw1.connected:
-                        break
-                    time.sleep(0.05)
-                nw1.nntp.sock.setblocking(True)
-                nw1.nntp.sock.settimeout(2)
-                nw1.read()
-                assert nw1.ready
+                nw1 = _connect_wrapper(s1)
 
                 # Stage 1: only the ordinary article is requested, and the journal is
                 # never armed for it (no journaling of ordinary traffic). Its response
@@ -2355,12 +2020,7 @@ class TestRawTransportCapture:
         )
 
         try:
-            with (
-                mock.patch.object(sabnzbd, "Downloader", mock_downloader, create=True),
-                mock.patch.object(sabnzbd, "BPSMeter", mock_bps, create=True),
-                mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
-                mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
-            ):
+            with _patched_services(mock_downloader, mock_bps, mock_cache, mock_queue):
                 nw1 = NewsWrapper(s1, thrdnum=1)
                 s1.idle_threads.add(nw1)
                 nw1.init_connect()
@@ -2609,6 +2269,29 @@ class TestRawTransportCapture:
         assert cap.retained == 0
         assert cap.take(5) is None
 
+    def test_raw_capture_take_spans_chunks_and_preserves_remainder(self):
+        """take(n) returns up to n bytes in order across chunks, preserving the rest."""
+        from sabnzbd.newswrapper import _RawBodyCapture
+
+        cap = _RawBodyCapture()
+        cap._bound = 4096
+        assert cap.take(0) is None
+        assert cap.take(5) is None  # journaled nothing yet: fails closed, stream untouched
+        for chunk in (b"abc", b"defg", b"hi", b"jklm"):
+            cap.add(chunk)
+        # Take less than the head chunk, exactly to a boundary, across chunks, and the tail.
+        assert cap.take(2) == b"ab"
+        assert cap.take(1) == b"c"
+        assert cap.take(4) == b"defg"
+        assert cap.take(5) == b"hijkl"
+        assert cap.retained == 1
+        # Asking for more than retained fails closed and leaves the remainder intact.
+        assert cap.take(2) is None
+        assert cap.retained == 1
+        assert cap.take(1) == b"m"
+        assert cap.retained == 0
+        assert cap.take(1) is None
+
 
 def _registered_success(queue_mock) -> bool:
     """The success flag of the last NzbQueue.register_article call, positional or keyword."""
@@ -2743,6 +2426,63 @@ class TestKeyCacheAndHeaderBounding:
         assert b"PAYLOAD DATA LINE" in restored
         assert out_salt == salt
         assert out_idx == seg_idx
+
+    def test_restore_control_lines_trailing_blank_line_after_yend(self):
+        """Trailing blank lines after =yend are ignored before footer line-index accounting.
+
+        Control Lines Std v1.2 section 5: N is the index of the last non-empty physical
+        line; a blank physical line after the encrypted =yend footer must not be treated
+        as the footer (lineIndex N) — the footer keeps the tweak of its real position and
+        the blank is outside the block (not carried into the restored block).
+        """
+        from sabnzbd.encryption import DecryptionAdapter
+
+        adapter = DecryptionAdapter(password="test123")
+        salt = b"\x02" * 16
+        master_key = adapter.get_master_key(salt)
+        seg_idx = 1
+
+        # Single-part: line 1 =ybegin, line 2 =yencryption, line 3 = data, line 4 = =yend
+        k1, t1 = adapter.derive_control_keys(master_key, seg_idx, 1)
+        k2, t2 = adapter.derive_control_keys(master_key, seg_idx, 2)
+        k4, t4 = adapter.derive_control_keys(master_key, seg_idx, 4)
+
+        wire_line1 = (
+            salt + seg_idx.to_bytes(4, "big") + ff1_encrypt(k1, t1, b"=ybegin line=128 size=50 name=test.bin") + b"\r\n"
+        )
+        line2_pt = (
+            f"=yencryption cipher=XChaCha20-Poly1305 salt={salt.hex()} index={seg_idx:08x} tag={'00' * 16}"
+        ).encode("ascii")
+        wire_line2 = ff1_encrypt(k2, t2, line2_pt) + b"\r\n"
+        data_line = b"PAYLOAD DATA LINE NOT CONTROL LINE\r\n"
+        wire_footer = ff1_encrypt(k4, t4, b"=yend size=50 crc32=12345678") + b"\r\n"
+
+        # A blank physical line after =yend (joined as an extra CRLF) is the regression case;
+        # also pin multiple trailing empties and a bare-LF empty tail.
+        for empty_tail in (b"\r\n", b"\r\n\r\n", b"\n"):
+            restored, out_salt, out_idx = adapter.restore_control_lines(
+                wire_line1 + wire_line2 + data_line + wire_footer + empty_tail
+            )
+            assert out_salt == salt
+            assert out_idx == seg_idx
+            assert line2_pt in restored
+            assert restored.endswith(b"=yend size=50 crc32=12345678\r\n")
+            # Compare against the no-tail restoration, not a slice of the returned block.
+            expected, _s, _i = adapter.restore_control_lines(wire_line1 + wire_line2 + data_line + wire_footer)
+            assert restored == expected
+
+    @pytest.mark.parametrize("blank_block", [b"\r\n", b"\n"])
+    def test_restore_control_lines_only_blank_lines_fails_closed(self, blank_block):
+        """A block of only blank lines raises YEncEncryptionCryptoError, not IndexError.
+
+        The trailing-blank pop can empty raw_lines; restore_control_lines must fail
+        closed (PROVIDER_FAILOVER) instead of indexing the now-empty list.
+        """
+        from sabnzbd.encryption import DecryptionAdapter
+
+        adapter = DecryptionAdapter(password="test123")
+        with pytest.raises(YEncEncryptionCryptoError, match="Empty encrypted article block"):
+            adapter.restore_control_lines(blank_block)
 
     def test_decoder_adapter_cached_on_nzo(self):
         """_get_decryption_adapter caches DecryptionAdapter on nzo to eliminate churn."""
@@ -3864,91 +3604,18 @@ class TestFF1ControlLineLengthLimit:
         srv2.start()
 
         try:
-            s1 = Server(
-                server_id="srv_oversized",
-                displayname="Primary Bad Server",
-                host=srv1.host,
-                port=srv1.port,
-                timeout=5,
-                threads=0,
-                priority=0,
-                use_ssl=False,
-                ssl_verify=0,
-                ssl_ciphers="",
-                pipelining_requests=mock.Mock(return_value=1),
-            )
-            s1.addrinfo = AddrInfo(*socket.getaddrinfo(srv1.host, srv1.port, socket.AF_INET, socket.SOCK_STREAM)[0])
-            s1.active = True
+            s1 = _make_server(srv1, "srv_oversized", "Primary Bad Server", priority=0, pipelining=1)
 
-            s2 = Server(
-                server_id="srv_good",
-                displayname="Backup Good Server",
-                host=srv2.host,
-                port=srv2.port,
-                timeout=5,
-                threads=0,
-                priority=1,
-                use_ssl=False,
-                ssl_verify=0,
-                ssl_ciphers="",
-                pipelining_requests=mock.Mock(return_value=1),
-            )
-            s2.addrinfo = AddrInfo(*socket.getaddrinfo(srv2.host, srv2.port, socket.AF_INET, socket.SOCK_STREAM)[0])
-            s2.active = True
+            s2 = _make_server(srv2, "srv_good", "Backup Good Server", priority=1, pipelining=1)
 
-            mock_downloader = mock.MagicMock(spec=Downloader)
-            mock_downloader.servers = [s1, s2]
-            mock_downloader.reset_nw = lambda nw, *args, **kwargs: None
-            mock_downloader.finish_connect_nw = lambda nw, resp: Downloader.finish_connect_nw(mock_downloader, nw, resp)
-            mock_downloader.decode = lambda article, resp: Downloader.decode(article, resp)
-            mock_downloader.modify_socket = lambda nw, event: None
-            mock_downloader.remove_socket = lambda nw: None
-            mock_downloader.no_active_jobs = lambda: False
-            mock_downloader.shutdown = False
-            mock_downloader.paused_for_postproc = False
-            mock_downloader.force_disconnect = False
+            mock_downloader = _mock_downloader([s1, s2])
 
-            mock_bps = mock.MagicMock()
-            mock_cache = mock.MagicMock()
-            mock_queue = mock.MagicMock()
+            mock_bps, mock_cache, mock_queue = _mock_services()
+            art, mock_nzo = _enc_article("art@oversized", password)
 
-            mock_nzo = mock.MagicMock()
-            mock_nzo.password = password
-            mock_nzo.yenc_encrypted = True
-            mock_nzo.precheck = False
-            mock_nzo.removed_from_queue = False
-            mock_nzo.status = "active"
-            mock_nzo.priority = 0
-            mock_nzo.update_download_stats = mock.MagicMock()
-
-            mock_nzf = mock.MagicMock()
-            mock_nzf.nzo = mock_nzo
-            mock_nzf.filename_checked = True
-            mock_nzf.type = "yenc"
-
-            art = Article("art@oversized", 100, mock_nzf)
-            art.lowest_partnum = False
-            art.on_disk = False
-            art.tries = 0
-
-            with (
-                mock.patch.object(sabnzbd, "Downloader", mock_downloader, create=True),
-                mock.patch.object(sabnzbd, "BPSMeter", mock_bps, create=True),
-                mock.patch.object(sabnzbd, "ArticleCache", mock_cache, create=True),
-                mock.patch.object(sabnzbd, "NzbQueue", mock_queue, create=True),
-            ):
+            with _patched_services(mock_downloader, mock_bps, mock_cache, mock_queue):
                 # 1. Connect NW1 to Server 1 (oversized article)
-                nw1 = NewsWrapper(s1, thrdnum=1)
-                s1.idle_threads.add(nw1)
-                nw1.init_connect()
-                for _ in range(50):
-                    if nw1.connected:
-                        break
-                    time.sleep(0.05)
-                nw1.nntp.sock.setblocking(True)
-                nw1.nntp.sock.settimeout(2)
-                nw1.read()
-                assert nw1.ready
+                nw1 = _connect_wrapper(s1)
 
                 # Request article from Server 1
                 art.fetcher = s1
@@ -3964,17 +3631,7 @@ class TestFF1ControlLineLengthLimit:
                 assert not mock_nzo.increase_bad_articles_counter.called
 
                 # 2. Connect NW2 to Server 2 (valid article)
-                nw2 = NewsWrapper(s2, thrdnum=1)
-                s2.idle_threads.add(nw2)
-                nw2.init_connect()
-                for _ in range(50):
-                    if nw2.connected:
-                        break
-                    time.sleep(0.05)
-                nw2.nntp.sock.setblocking(True)
-                nw2.nntp.sock.settimeout(2)
-                nw2.read()
-                assert nw2.ready
+                nw2 = _connect_wrapper(s2)
 
                 # Request article from Server 2
                 art.fetcher = s2

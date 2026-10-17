@@ -424,16 +424,18 @@
       "expected_error": "MISSING_ENCRYPTION_PROVENANCE",
       "expected_rejection_stage": "METADATA_VALIDATION",
       "provider_failover_permitted": false,
-      "zero_output_required": true
+      "zero_output_required": true,
+      "context": "decryption explicitly requested"
     },
     {
       "id": "metadata-02-false-provenance",
       "category": "metadata_validation",
-      "description": "Transport provenance explicitly set to false",
+      "description": "Transport provenance explicitly set to false, which does not satisfy provenance when decryption is explicitly requested (without that request, a non-true value is ordinary yEnc per Body Standard Section 8)",
       "expected_error": "INVALID_ENCRYPTION_PROVENANCE",
       "expected_rejection_stage": "METADATA_VALIDATION",
       "provider_failover_permitted": false,
-      "zero_output_required": true
+      "zero_output_required": true,
+      "context": "decryption explicitly requested"
     },
     {
       "id": "malformed-header-18-uppercase-hex",

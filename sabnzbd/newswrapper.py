@@ -19,6 +19,7 @@
 sabnzbd.newswrapper
 """
 
+from collections import deque
 import errno
 import socket
 import threading
@@ -91,10 +92,23 @@ class _RawBodyCapture:
     command) never misaligns later responses (DL-R8-1).
     """
 
-    __slots__ = ("_chunks", "_retained", "_bound", "_dropped", "_processed", "_consumed", "_journal_start", "_armed")
+    __slots__ = (
+        "_chunks",
+        "_head_offset",
+        "_retained",
+        "_bound",
+        "_dropped",
+        "_processed",
+        "_consumed",
+        "_journal_start",
+        "_armed",
+    )
 
     def __init__(self):
-        self._chunks: list[bytes] = []
+        self._chunks: deque[bytes] = deque()
+        # Offset into _chunks[0] already consumed by take(); the head chunk is
+        # sliced only once, when it is fully consumed or the journal is cleared.
+        self._head_offset = 0
         self._retained = 0
         self._bound = 0
         self._dropped = False
@@ -169,6 +183,7 @@ class _RawBodyCapture:
         self._bound = max(0, self._bound - retired)
         if not self._bound:
             self._chunks.clear()
+            self._head_offset = 0
             self._retained = 0
             self._dropped = False
 
@@ -179,6 +194,7 @@ class _RawBodyCapture:
         accounting restarts with them.
         """
         self._chunks.clear()
+        self._head_offset = 0
         self._retained = 0
         self._bound = 0
         self._dropped = False
@@ -197,6 +213,7 @@ class _RawBodyCapture:
             # Bound trip: drop instead of growing; take() then yields nothing and the
             # article fails closed through the ordinary encrypted guard.
             self._chunks.clear()
+            self._head_offset = 0
             self._retained = 0
             self._dropped = True
             return
@@ -235,13 +252,16 @@ class _RawBodyCapture:
         remaining = need
         while remaining:
             chunk = self._chunks[0]
-            if len(chunk) <= remaining:
-                out += chunk
-                remaining -= len(chunk)
-                self._chunks.pop(0)
+            available = len(chunk) - self._head_offset
+            if available <= remaining:
+                out += chunk[self._head_offset :]
+                remaining -= available
+                self._chunks.popleft()
+                self._head_offset = 0
             else:
-                out += chunk[:remaining]
-                self._chunks[0] = chunk[remaining:]
+                cut = self._head_offset + remaining
+                out += chunk[self._head_offset : cut]
+                self._head_offset = cut
                 remaining = 0
         self._consumed = end
         self._retained -= need
@@ -667,7 +687,11 @@ class NewsWrapper:
             half = max(1, len(memoryview(self.decoder)) // 2)
             nbytes = min(nbytes, half) if nbytes else half
 
-        # Receive data into the decoder pre-allocated buffer
+        # Receive data into the decoder pre-allocated buffer.
+        # Encrypted reads deliberately avoid unlocked_ssl_recv_into: encrypted jobs have
+        # nbytes capped at half the decoder buffer above (settled Q-2 half-cap, so the
+        # bare-LF -> CRLF rewrite always fits), so the unlocked fast path — which takes
+        # no nbytes — is never taken for them; only ordinary jobs use it.
         if not nbytes and self.nntp.nw.server.ssl and not self.nntp.nw.blocking and sabctools.openssl_linked:
             # Use patched version when downloading
             bytes_recv = sabctools.unlocked_ssl_recv_into(self.nntp.sock, self.decoder)

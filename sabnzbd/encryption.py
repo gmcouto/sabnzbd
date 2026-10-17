@@ -398,6 +398,9 @@ def extract_and_remove_yencryption(yenc_block: bytes) -> tuple[dict[str, Any], b
 
     if part_number >= (1 << 32) or part_begin >= (1 << 32) or segment_bytes >= (1 << 32):
         raise YEncEncryptionCryptoError("SIZE_OVERFLOW: size or offset exceeds 4 GiB (2^32 bytes)")
+    # Multipart whole-file check: =ybegin size= declares the whole file, not this segment, so it
+    # needs its own >= 2^32 bound (Body Std v1.2 §2.1). For single-part articles size= is the
+    # source of segment_bytes, so this re-check is redundant with the check above (kept, labelled).
     if b"size" in ybegin_values and _required_int(ybegin_values, b"size", "=ybegin") >= (1 << 32):
         raise YEncEncryptionCryptoError("SIZE_OVERFLOW: size exceeds 4 GiB (2^32 bytes)")
 
@@ -582,13 +585,25 @@ class DecryptionAdapter:
         decided by physical line 2 (=ypart or =yencryption), with part= in the restored =ybegin
         line only cross-checked against it; data lines pass through untouched
         byte-for-byte and are never decrypted or inspected; the footer is identified by
-        position (last physical line), never by content search. The SAB transport layer
+        position (the last non-empty physical line, Control Std v1.2 §5 steps 4g/6: N is
+        its 1-based index and trailing empty lines are ignored before footer counting),
+        never by content search. Trailing empty lines are outside the yEnc block and are
+        excluded before footer identification/line-index accounting; they are not carried
+        into the restored block. The SAB transport layer
         (newswrapper.read) rewrites bare LF to CRLF and decoder.py rebuilds the block
         with CRLF terminators, so every line here ends with CRLF.
 
         Returns (restored_yenc_block, salt, segment_index).
         """
         raw_lines = split_lines_preserving_endings(yenc_block)
+
+        # Exclude trailing empty physical lines before footer identification/line-index
+        # accounting (Control Std v1.2 §5: N is the last non-empty physical line).
+        while raw_lines and _split_ending(raw_lines[-1])[0] == b"":
+            raw_lines.pop()
+
+        if not raw_lines:
+            raise YEncEncryptionCryptoError("Empty encrypted article block")
 
         # Line 1 (lineIndex=1): bootstrap prefix + FF1-encrypted =ybegin
         line1_content, line1_ending = _split_ending(raw_lines[0])
@@ -640,7 +655,7 @@ class DecryptionAdapter:
         for idx in range(first_data_line_index - 1, len(raw_lines) - 1):
             restored_lines.append(raw_lines[idx])
 
-        # Footer at the fixed last position (lineIndex = N); no content-based search
+        # Footer at the fixed position N (last non-empty physical line); no content-based search
         footer_content, footer_ending = _split_ending(raw_lines[-1])
         footer_line_index = len(raw_lines)
         enc_key, tweak = self.derive_control_keys(master_key, segment_index, footer_line_index)
